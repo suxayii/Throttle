@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>网络限速管理</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <h1>网络限速管理</h1>
+  <!-- 增加端口 -->
+  <div>
+    <label for="addPort">添加需要限速的端口（用逗号分隔）：</label>
+    <input type="text" id="addPort">
+    <button onclick="addPort()">添加</button>
+  </div>
+  <!-- 显示当前限速端口 -->
+  <div>
+    <h2>当前限速端口：</h2>
+    <ul id="portList"></ul>
+  </div>
+  <!-- 修改网速 -->
+  <div>
+    <label for="totalBandwidth">总带宽 (KBps)：</label>
+    <input type="number" id="totalBandwidth">
+    <label for="rate">单个 IP 限速 (KBps)：</label>
+    <input type="number" id="rate">
+    <label for="ceil">允许的最大速率 (KBps)：</label>
+    <input type="number" id="ceil">
+    <button onclick="updateSpeed()">保存网速设置</button>
+  </div>
+  <!-- 清除规则 -->
+  <div>
+    <button onclick="clearAllPorts()">清除所有限速端口</button>
+    <label for="removePorts">移除单个或多个限速端口（用逗号分隔）：</label>
+    <input type="text" id="removePorts">
+    <button onclick="removePorts()">移除</button>
+  </div>
+  <div id="result"></div>
+  <script src="script.js"></script>
+</body>
+
+</html>
