@@ -751,10 +751,14 @@ show_menu() {
             configure_proxy
             create_systemd_service
             show_result
+            read -p "按任意键返回主菜单..."
+            show_menu
             ;;
         2)
             check_root
             uninstall
+            read -p "按任意键返回主菜单..."
+            show_menu
             ;;
         3)
             if systemctl is-active --quiet gost 2>/dev/null; then
@@ -763,24 +767,33 @@ show_menu() {
             else
                 log_warn "GOST 未运行"
             fi
+            read -p "按任意键返回主菜单..."
+            show_menu
             ;;
         4)
             show_proxy_info
+            read -p "按任意键返回主菜单..."
+            show_menu
             ;;
         5)
             check_root
             modify_proxy
+            read -p "按任意键返回主菜单..."
+            show_menu
             ;;
         6)
             check_root
             optimize_network
+            read -p "按任意键返回主菜单..."
+            show_menu
             ;;
         0)
             exit 0
             ;;
         *)
             log_error "无效选项"
-            exit 1
+            read -p "按任意键重试..."
+            show_menu
             ;;
     esac
 }
