@@ -253,8 +253,8 @@ configure_proxy() {
         read -p "设置端口 (默认 443): " PORT
         PORT=${PORT:-443}
         
-        check_port_occupied "$PORT" "verbose"
-        local status=$?
+        local status=0
+        check_port_occupied "$PORT" "verbose" || status=$?
         
         if [[ $status -eq 1 ]]; then
             # 未占用
@@ -280,8 +280,8 @@ configure_proxy() {
             read -p "设置 HTTP 端口 (默认 8080): " PORT2
             PORT2=${PORT2:-8080}
             
-            check_port_occupied "$PORT2" "verbose"
-            local status=$?
+            local status=0
+            check_port_occupied "$PORT2" "verbose" || status=$?
             
             if [[ $status -eq 1 ]]; then
                 break
@@ -553,8 +553,8 @@ modify_proxy() {
                     break
                 fi
                 
-                check_port_occupied "$new_port" "verbose"
-                local status=$?
+                local status=0
+                check_port_occupied "$new_port" "verbose" || status=$?
                 
                 if [[ $status -eq 1 ]]; then
                     break
