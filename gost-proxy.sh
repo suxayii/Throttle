@@ -643,6 +643,108 @@ modify_proxy() {
     show_proxy_info
 }
 
+add_proxy_node() {
+    echo ""
+    echo -e "${BLUE}═══════════════ 添加新代理节点 ═══════════════${NC}"
+    echo ""
+    
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        log_error "未找到 GOST 服务配置，请先安装"
+        return 1
+    fi
+    
+    # 1. 设置新代理参数
+    echo "请配置新节点参数:"
+    
+    # 协议
+    echo "协议类型:"
+    echo "  1) SOCKS5 (默认)"
+    echo "  2) HTTP"
+    read -p "请输入 [1-2]: " PROTO_CHOICE
+    PROTO_CHOICE=${PROTO_CHOICE:-1}
+    [[ "$PROTO_CHOICE" == "2" ]] && NEW_PROTO="http" || NEW_PROTO="socks5"
+    
+    # 端口
+    while true; do
+        read -p "设置端口 (例如 1080): " NEW_PORT
+        if [[ -z "$NEW_PORT" ]]; then
+            log_error "端口不能为空"
+            continue
+        fi
+        
+        local status=0
+        check_port_occupied "$NEW_PORT" "verbose" || status=$?
+        
+        if [[ $status -eq 1 ]]; then
+            break
+        elif [[ $status -eq 2 ]]; then
+             read -p "端口被旧的 GOST 服务占用，是否继续? [Y/n]: " confirm
+             [[ "$confirm" =~ ^[Nn]$ ]] || break
+        else
+            read -p "端口被其他程序占用，强制使用可能导致启动失败。是否继续? [y/N]: " confirm
+            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                break
+            else
+                 log_info "请重新设置端口"
+            fi
+        fi
+    done
+    
+    # 认证
+    read -p "是否启用认证? [y/N]: " ENABLE_AUTH
+    NEW_AUTH=""
+    if [[ "$ENABLE_AUTH" =~ ^[Yy]$ ]]; then
+        read -p "设置用户名: " NEW_USER
+        read -s -p "设置密码: " NEW_PASS
+        echo ""
+        if [[ -n "$NEW_USER" && -n "$NEW_PASS" ]]; then
+            NEW_AUTH="${NEW_USER}:${NEW_PASS}@"
+        fi
+    fi
+    
+    # 2. 构造新参数
+    NEW_ARG="-L '${NEW_PROTO}://${NEW_AUTH}:${NEW_PORT}?keepalive=true'"
+    
+    # 3. 读取当前 ExecStart (处理多行情况)
+    # 注意：systemd service 文件中 ExecStart 可能很长。简单处理：假设在一行或者追加到最后。
+    # 更稳妥的方式是：读取整行，去掉最后的 "，追加 new_arg
+    
+    local output=$(grep "^ExecStart=" "$SERVICE_FILE")
+    local current_cmd=${output#ExecStart=}
+    
+    # 4. 追加新参数
+    # 如果原本就是 gost -L ... 格式，直接追加
+    local new_cmd="${current_cmd} ${NEW_ARG}"
+    
+    # 5. 更新文件
+    # 使用 awk 或 sed 替换。由于包含特殊字符，sed 比较麻烦，尝试用临时文件
+    # 这里为了简单，我们用 perl 或者纯 bash 生成新内容
+    
+    # 备份
+    cp "$SERVICE_FILE" "${SERVICE_FILE}.bak"
+    
+    # 写入新内容 (使用 awk 避免转义噩梦)
+    awk -v new="$new_cmd" '/^ExecStart=/ {$0="ExecStart=" new} 1' "${SERVICE_FILE}.bak" > "$SERVICE_FILE"
+    
+    log_info "已添加新节点配置。"
+    
+    # 重启服务
+    systemctl daemon-reload
+    if systemctl restart gost; then
+        echo ""
+        log_info "服务已重启，新节点已生效！"
+        show_proxy_info
+    else
+        echo ""
+        log_error "服务启动失败！正在回滚配置..."
+        mv "${SERVICE_FILE}.bak" "$SERVICE_FILE"
+        systemctl daemon-reload
+        systemctl restart gost
+        log_info "已恢复原有配置。"
+        return 1
+    fi
+}
+
 show_proxy_info() {
     local public_ip=$(get_public_ip)
     
@@ -735,10 +837,11 @@ show_menu() {
     echo "  3) 查看运行状态"
     echo "  4) 查看代理配置"
     echo "  5) 修改代理配置"
-    echo "  6) BBR & TCP 网络优化"
+    echo "  6) 添加新代理节点 (多端口)"
+    echo "  7) BBR & TCP 网络优化"
     echo "  0) 退出"
     echo ""
-    read -p "请输入 [0-6]: " choice
+    read -p "请输入 [0-7]: " choice
     
     case "$choice" in
         1) 
@@ -782,6 +885,12 @@ show_menu() {
             show_menu
             ;;
         6)
+            check_root
+            add_proxy_node
+            read -p "按任意键返回主菜单..."
+            show_menu
+            ;;
+        7)
             check_root
             optimize_network
             read -p "按任意键返回主菜单..."
