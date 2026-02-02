@@ -23,7 +23,7 @@ PAUSED_FILE="/etc/gost/paused_nodes.conf"
 print_banner() {
     echo -e "${CYAN}"
     echo "╔═══════════════════════════════════════════╗"
-    echo "║       GOST 代理一键部署脚本 v2.1          ║"
+    echo "║       GOST 代理一键部署脚本 v2.0          ║"
     echo "╚═══════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -782,6 +782,9 @@ manage_paused_proxies() {
                     log_error "无法解析服务配置"
                     continue
                 fi
+                
+                # DEBUG PRINT
+                echo "DEBUG: Detected ExecLine: [$exec_line]"
                 
                 # parser
                 declare -a nodes
