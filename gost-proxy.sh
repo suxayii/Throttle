@@ -976,6 +976,24 @@ manage_paused_proxies() {
     done
 }
 
+update_script() {
+    echo -e "${BLUE}═══════════════ 更新脚本 ═══════════════${NC}"
+    local update_url="https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh"
+    local script_path=$(readlink -f "$0")
+    
+    log_info "正在检查更新..."
+    
+    if curl -sL --fail "$update_url" -o "${script_path}.tmp"; then
+        mv "${script_path}.tmp" "$script_path"
+        chmod +x "$script_path"
+        log_info "脚本更新成功！正在重启..."
+        exec bash "$script_path"
+    else
+        log_error "更新失败，请检查网络连接或手动下载。"
+        rm -f "${script_path}.tmp"
+    fi
+}
+
 show_proxy_info() {
     local public_ip=$(get_public_ip)
     
@@ -1071,9 +1089,10 @@ show_menu() {
     echo "  6) 添加新代理节点 (多端口)"
     echo "  7) BBR & TCP 网络优化"
     echo "  8) 管理暂停的代理"
+    echo "  9) 更新脚本"
     echo "  0) 退出"
     echo ""
-    read -p "请输入 [0-8]: " choice
+    read -p "请输入 [0-9]: " choice
     
     case "$choice" in
         1) 
@@ -1133,6 +1152,9 @@ show_menu() {
             manage_paused_proxies
             read -p "按任意键返回主菜单..."
             show_menu
+            ;;
+        9)
+            update_script
             ;;
         0)
             exit 0
