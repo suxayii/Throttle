@@ -4,7 +4,7 @@
 # GOST 代理一键部署脚本 (优化版)
 # ============================================
 
-set -e
+# set -e # 移除全局中断，改用手动检查
 
 # --- 颜色定义 ---
 RED='\033[0;31m'
@@ -783,46 +783,23 @@ manage_paused_proxies() {
                     continue
                 fi
                 
-                # DEBUG PRINT
-                echo "DEBUG: Detected ExecLine: [$exec_line]"
+                # 解析运行中的代理节点
+                nodes=()
                 
-                # parser
-                declare -a nodes
-                local i=0
+                # 提取所有 -L 参数。支持单引号、双引号或无引号。
+                # 逻辑：查找 -L 后面跟着的内容，直到下一个 -L 或行尾。
+                local temp_exec="$exec_line"
+                # 预处理：将所有 -L 'url' 格式提取出来
+                local nodes_raw=$(echo "$exec_line" | grep -oE "\-L\s+('[^']+'|\"[^\"]+\"|[^ ]+)" | sed -E 's/^-L\s+//; s/^['"'""]//; s/['"'""]$//' || echo "")
                 
-                # Use a more robust regex to capture all -L '...' arguments
-                # We first extract all parts starting with -L
-                local exec_params=${exec_line// -L /$'\n'}
-                
-                while read -r param; do
-                    # Skip the executable path itself or empty lines
-                    [[ "$param" == "$exec_line" ]] && continue
-                    [[ -z "$param" ]] && continue
-                    
-                    # Clean up the param to just the url inside quotes
-                    # It might look like: 'socks5://...' or 'socks5://...' other_args
-                    local clean_node=$(echo "$param" | awk -F"'" '{print $2}')
-                    
-                    if [[ -n "$clean_node" ]]; then
-                        nodes[i]="$clean_node"
-                        ((i++))
-                    fi
-                done <<< "$exec_params"
-                
-                # Fallback: if array is empty, maybe it's the old single param format without repeated -L?
-                # or maybe the sed logic above failed.
-                # Let's try the original grep method if nodes is empty
-                if [[ ${#nodes[@]} -eq 0 ]]; then
-                     while read -r node; do
-                        [[ -z "$node" ]] && continue
-                        nodes[i]="$node"
-                        ((i++))
-                    done < <(echo "$exec_line" | grep -oE "\-L '[^']+'" | sed "s/^-L //; s/'//g")
+                if [[ -n "$nodes_raw" ]]; then
+                    while read -r node; do
+                        [[ -n "$node" ]] && nodes+=("$node")
+                    done <<< "$nodes_raw"
                 fi
-
+                
                 if [[ ${#nodes[@]} -eq 0 ]]; then
-                    log_warn "未检测到运行中的代理节点与标准格式匹配。"
-                    echo "Debug: ExecLine: $exec_line"
+                    log_warn "未检测到代理节点。配置内容: $exec_line"
                     continue
                 fi
                 
@@ -845,11 +822,7 @@ manage_paused_proxies() {
                 
                 local target_node="${nodes[$((node_idx-1))]}"
                 
-                # Remove from service file
-                # The logic relies on exact string match, potentially fragile with subtle variations but standard for this script structure
-                # We reconstruct the command excluding the target node
-                
-                # Careful not to leave gost with no arguments if it's the only one
+                # 处理唯一节点的情况
                 if [[ ${#nodes[@]} -eq 1 ]]; then
                     log_warn "这是唯一运行的节点，暂停将导致服务无法启动。建议直接停止服务。"
                     read -p "是否确认暂停并停止服务? [y/N]: " confirm_stop
@@ -858,14 +831,8 @@ manage_paused_proxies() {
                          echo "$target_node" >> "$PAUSED_FILE"
                          # stop service
                          systemctl stop gost
-                         # remove from service file (make it empty or dummy? keeping it empty might fail start)
-                         # better to just leave the service file as is but stopped? 
-                         # But user requirement implies "pausing a specific one". 
-                         # If it's the only one, we just stop the service and maybe clear the ExecStart args to reflect state?
-                         # Let's clean the args.
-                         local new_exec=$(echo "$exec_line" | sed "s| -L '${target_node}'||g; s|-L '${target_node}' ||g; s|-L '${target_node}'||g")
-                         # if new_exec becomes just "gost", it fails. 
-                         # Let's just save to paused and stop service if it becomes empty.
+                         # 清理 ExecStart 参数
+                         local new_exec=${exec_line%% -L*}
                          
                          sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
                          log_info "唯一节点已暂停，服务已停止。"
@@ -981,15 +948,28 @@ update_script() {
     local update_url="https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh"
     local script_path=$(readlink -f "$0")
     
+    # 检查是否是在通过管道运行 (bash <(curl ...))
+    # 管道运行下 $0 通常是 bash 或者 /dev/fd/*
+    if [[ "$script_path" == "/dev/fd/"* ]] || [[ "$0" == "bash" ]] || [[ ! -f "$script_path" ]] || [[ ! -w "$script_path" ]]; then
+        log_warn "由于您当前是直接通过网络链接 (curl) “在线运行”的脚本，无法自行修改磁盘文件进行更新。"
+        echo ""
+        log_info "如果您想支持本地自动更新，请先执行以下命令下载脚本到本地："
+        echo -e "  ${CYAN}curl -O $update_url && chmod +x gost-proxy.sh${NC}"
+        echo ""
+        log_info "下载后，请使用 ${CYAN}./gost-proxy.sh${NC} 运行。"
+        return 1
+    fi
+    
     log_info "正在检查更新..."
     
     if curl -sL --fail "$update_url" -o "${script_path}.tmp"; then
         mv "${script_path}.tmp" "$script_path"
         chmod +x "$script_path"
-        log_info "脚本更新成功！正在重启..."
+        log_info "脚本更新成功！正在重新启动..."
+        sleep 1
         exec bash "$script_path"
     else
-        log_error "更新失败，请检查网络连接或手动下载。"
+        log_error "更新失败，请检查网络连接。"
         rm -f "${script_path}.tmp"
     fi
 }
