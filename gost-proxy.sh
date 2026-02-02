@@ -846,7 +846,15 @@ manage_paused_proxies() {
                 fi
                 
                 # Regular removal
-                local new_exec=$(echo "$exec_line" | sed "s| -L '${target_node}'||g; s|-L '${target_node}' ||g; s|-L '${target_node}'||g")
+                local cmd_prefix=${exec_line%% -L*}
+                local new_exec="$cmd_prefix"
+                
+                for ((n=0; n<${#nodes[@]}; n++)); do
+                    if [[ $n -ne $((node_idx-1)) ]]; then
+                        new_exec="${new_exec} -L '${nodes[n]}'"
+                    fi
+                done
+                
                 sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
                 
                 # Save to paused file
