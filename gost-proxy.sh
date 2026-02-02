@@ -17,6 +17,7 @@ NC='\033[0m'
 # --- 全局变量 ---
 INSTALL_PATH="/usr/local/bin/gost"
 SERVICE_FILE="/etc/systemd/system/gost.service"
+PAUSED_FILE="/etc/gost/paused_nodes.conf"
 
 # --- 辅助函数 ---
 print_banner() {
@@ -96,6 +97,16 @@ check_port_occupied() {
     fi
     
     return 1
+}
+
+# 确保配置目录存在
+init_config_dir() {
+    if [[ ! -d "/etc/gost" ]]; then
+        mkdir -p "/etc/gost"
+    fi
+    if [[ ! -f "$PAUSED_FILE" ]]; then
+        touch "$PAUSED_FILE"
+    fi
 }
 
 check_existing_installation() {
@@ -743,6 +754,189 @@ add_proxy_node() {
         log_info "已恢复原有配置。"
         return 1
     fi
+    fi
+}
+
+manage_paused_proxies() {
+    init_config_dir
+    
+    while true; do
+        echo ""
+        echo -e "${BLUE}═══════════════ 管理暂停的代理 ═══════════════${NC}"
+        echo ""
+        echo "请选择操作:"
+        echo "  1) 暂停运行中的代理"
+        echo "  2) 恢复已暂停的代理"
+        echo "  0) 返回主菜单"
+        echo ""
+        read -p "请输入 [0-2]: " pause_choice
+        
+        case "$pause_choice" in
+            1)
+                if [[ ! -f "$SERVICE_FILE" ]]; then
+                    log_error "未找到 GOST 服务配置"
+                    continue
+                fi
+                
+                local exec_line=$(grep "^ExecStart=" "$SERVICE_FILE" | sed 's/ExecStart=//')
+                if [[ -z "$exec_line" ]]; then
+                    log_error "无法解析服务配置"
+                    continue
+                fi
+                
+                # parser
+                declare -a nodes
+                local i=0
+                while read -r node; do
+                    nodes[i]="$node"
+                    ((i++))
+                done < <(echo "$exec_line" | grep -oE "\-L '[^']+'" | sed "s/^-L //; s/'//g")
+                
+                if [[ ${#nodes[@]} -eq 0 ]]; then
+                    log_warn "当前没有运行中的代理节点"
+                    continue
+                fi
+                
+                echo "运行中的节点:"
+                for ((j=0; j<${#nodes[@]}; j++)); do
+                   echo "  $((j+1))) ${nodes[j]}"
+                done
+                echo "  0) 返回"
+                
+                read -p "选择要暂停的节点 [1-${#nodes[@]}]: " node_idx
+                 
+                if [[ "$node_idx" == "0" ]]; then
+                    continue
+                fi
+                
+                if [[ ! "$node_idx" =~ ^[0-9]+$ ]] || [[ "$node_idx" -gt "${#nodes[@]}" ]] || [[ "$node_idx" -lt 1 ]]; then
+                    log_error "无效选择"
+                    continue
+                fi
+                
+                local target_node="${nodes[$((node_idx-1))]}"
+                
+                # Remove from service file
+                # The logic relies on exact string match, potentially fragile with subtle variations but standard for this script structure
+                # We reconstruct the command excluding the target node
+                
+                # Careful not to leave gost with no arguments if it's the only one
+                if [[ ${#nodes[@]} -eq 1 ]]; then
+                    log_warn "这是唯一运行的节点，暂停将导致服务无法启动。建议直接停止服务。"
+                    read -p "是否确认暂停并停止服务? [y/N]: " confirm_stop
+                    if [[ "$confirm_stop" =~ ^[Yy]$ ]]; then
+                         # save to paused file
+                         echo "$target_node" >> "$PAUSED_FILE"
+                         # stop service
+                         systemctl stop gost
+                         # remove from service file (make it empty or dummy? keeping it empty might fail start)
+                         # better to just leave the service file as is but stopped? 
+                         # But user requirement implies "pausing a specific one". 
+                         # If it's the only one, we just stop the service and maybe clear the ExecStart args to reflect state?
+                         # Let's clean the args.
+                         local new_exec=$(echo "$exec_line" | sed "s| -L '${target_node}'||g; s|-L '${target_node}' ||g; s|-L '${target_node}'||g")
+                         # if new_exec becomes just "gost", it fails. 
+                         # Let's just save to paused and stop service if it becomes empty.
+                         
+                         sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
+                         log_info "唯一节点已暂停，服务已停止。"
+                         continue
+                    else
+                        continue
+                    fi
+                fi
+                
+                # Regular removal
+                local new_exec=$(echo "$exec_line" | sed "s| -L '${target_node}'||g; s|-L '${target_node}' ||g; s|-L '${target_node}'||g")
+                sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
+                
+                # Save to paused file
+                echo "$target_node" >> "$PAUSED_FILE"
+                log_info "节点已暂停并保存: $target_node"
+                
+                systemctl daemon-reload
+                systemctl restart gost
+                log_info "服务已重启"
+                ;;
+                
+            2)
+                if [[ ! -s "$PAUSED_FILE" ]]; then
+                    log_warn "没有已暂停的节点"
+                    continue
+                fi
+                
+                declare -a paused_nodes
+                local k=0
+                while read -r line; do
+                    [[ -z "$line" ]] && continue
+                    paused_nodes[k]="$line"
+                    ((k++))
+                done < "$PAUSED_FILE"
+                
+                echo "已暂停的节点:"
+                for ((m=0; m<${#paused_nodes[@]}; m++)); do
+                    echo "  $((m+1))) ${paused_nodes[m]}"
+                done
+                echo "  0) 返回"
+                
+                read -p "选择要恢复的节点 [1-${#paused_nodes[@]}]: " resume_idx
+                
+                if [[ "$resume_idx" == "0" ]]; then
+                    continue
+                fi
+                
+                if [[ ! "$resume_idx" =~ ^[0-9]+$ ]] || [[ "$resume_idx" -gt "${#paused_nodes[@]}" ]] || [[ "$resume_idx" -lt 1 ]]; then
+                    log_error "无效选择"
+                    continue
+                fi
+                
+                local target_resume="${paused_nodes[$((resume_idx-1))]}"
+                
+                # Add back to service
+                # Check if service file exists, create if not (edge case: uninstalled but file remains?)
+                if [[ ! -f "$SERVICE_FILE" ]]; then
+                    # If service doesn't exist, we basically need to re-install or at least re-create skeleton.
+                    # Simplified: assume service exists if we are here, or warn.
+                     log_error "服务文件不存在，无法恢复。请先安装 GOST。"
+                     continue
+                fi
+                
+                local exec_line=$(grep "^ExecStart=" "$SERVICE_FILE")
+                local current_cmd=${exec_line#ExecStart=}
+                
+                # if current_cmd is just "gost" or empty (after manual mess up), fix it
+                 if [[ -z "$current_cmd" ]]; then
+                    # Should re-build basic cmd
+                     current_cmd="gost"
+                 fi
+                 
+                local new_cmd="${current_cmd} -L '${target_resume}'"
+                
+                # Update service
+                # escape special chars for sed is hard, using tmp file method again or awk
+                 awk -v new="$new_cmd" '/^ExecStart=/ {$0="ExecStart=" new} 1' "$SERVICE_FILE" > "${SERVICE_FILE}.tmp" && mv "${SERVICE_FILE}.tmp" "$SERVICE_FILE"
+                 
+                 # Remove from paused file
+                 # We use grep -v to filter out the exact line. 
+                 # Edge case: duplicate lines? safely remove one instance or all matching? 
+                 # Let's remove matches.
+                 grep -vFx "$target_resume" "$PAUSED_FILE" > "${PAUSED_FILE}.tmp" && mv "${PAUSED_FILE}.tmp" "$PAUSED_FILE"
+                 
+                 log_info "节点已恢复: $target_resume"
+                 
+                 systemctl daemon-reload
+                 systemctl restart gost
+                 log_info "服务已重启"
+                ;;
+                
+            0)
+                return 0
+                ;;
+            *)
+                log_error "无效选项"
+                ;;
+        esac
+    done
 }
 
 show_proxy_info() {
@@ -839,6 +1033,7 @@ show_menu() {
     echo "  5) 修改代理配置"
     echo "  6) 添加新代理节点 (多端口)"
     echo "  7) BBR & TCP 网络优化"
+    echo "  8) 管理暂停的代理"
     echo "  0) 退出"
     echo ""
     read -p "请输入 [0-7]: " choice
@@ -893,6 +1088,12 @@ show_menu() {
         7)
             check_root
             optimize_network
+            read -p "按任意键返回主菜单..."
+            show_menu
+            ;;
+        8)
+            check_root
+            manage_paused_proxies
             read -p "按任意键返回主菜单..."
             show_menu
             ;;
