@@ -1035,7 +1035,7 @@ show_menu() {
     echo "  8) 管理暂停的代理"
     echo "  0) 退出"
     echo ""
-    read -p "请输入 [0-7]: " choice
+    read -p "请输入 [0-8]: " choice
     
     case "$choice" in
         1) 
