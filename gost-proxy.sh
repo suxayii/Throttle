@@ -23,7 +23,7 @@ PAUSED_FILE="/etc/gost/paused_nodes.conf"
 print_banner() {
     echo -e "${CYAN}"
     echo "╔═══════════════════════════════════════════╗"
-    echo "║       GOST 代理一键部署脚本 v2.0          ║"
+    echo "║       GOST 代理一键部署脚本 v2.1          ║"
     echo "╚═══════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -786,13 +786,40 @@ manage_paused_proxies() {
                 # parser
                 declare -a nodes
                 local i=0
-                while read -r node; do
-                    nodes[i]="$node"
-                    ((i++))
-                done < <(echo "$exec_line" | grep -oE "\-L '[^']+'" | sed "s/^-L //; s/'//g")
                 
+                # Use a more robust regex to capture all -L '...' arguments
+                # We first extract all parts starting with -L
+                local exec_params=${exec_line// -L /$'\n'}
+                
+                while read -r param; do
+                    # Skip the executable path itself or empty lines
+                    [[ "$param" == "$exec_line" ]] && continue
+                    [[ -z "$param" ]] && continue
+                    
+                    # Clean up the param to just the url inside quotes
+                    # It might look like: 'socks5://...' or 'socks5://...' other_args
+                    local clean_node=$(echo "$param" | awk -F"'" '{print $2}')
+                    
+                    if [[ -n "$clean_node" ]]; then
+                        nodes[i]="$clean_node"
+                        ((i++))
+                    fi
+                done <<< "$exec_params"
+                
+                # Fallback: if array is empty, maybe it's the old single param format without repeated -L?
+                # or maybe the sed logic above failed.
+                # Let's try the original grep method if nodes is empty
                 if [[ ${#nodes[@]} -eq 0 ]]; then
-                    log_warn "当前没有运行中的代理节点"
+                     while read -r node; do
+                        [[ -z "$node" ]] && continue
+                        nodes[i]="$node"
+                        ((i++))
+                    done < <(echo "$exec_line" | grep -oE "\-L '[^']+'" | sed "s/^-L //; s/'//g")
+                fi
+
+                if [[ ${#nodes[@]} -eq 0 ]]; then
+                    log_warn "未检测到运行中的代理节点与标准格式匹配。"
+                    echo "Debug: ExecLine: $exec_line"
                     continue
                 fi
                 
