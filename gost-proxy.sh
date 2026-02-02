@@ -754,7 +754,6 @@ add_proxy_node() {
         log_info "已恢复原有配置。"
         return 1
     fi
-    fi
 }
 
 manage_paused_proxies() {
