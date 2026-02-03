@@ -1,75 +1,75 @@
-# Throttle
+# Linux 网络优化与管理工具集
 
-> 一个用于 [简要描述项目功能] 的应用程序。
+本项目包含一组用于 Linux 服务器网络管理、优化和代理部署的 Shell 脚本。
 
-## 目录
+## 包含的工具
 
-- [安装](#安装)
-- [使用方法](#使用方法)
-- [文件结构](#文件结构)
-- [贡献](#贡献)
-- [许可证](#许可证)
+### 1. 端口限速工具 (`Throttle.sh`)
 
-## 安装
+一个用于限制特定端口流量速率的脚本，基于 `tc` (Traffic Control) 和 `iptables`。
 
-请确保您的系统已安装 [Node.js](https://nodejs.org/)（版本要求：x.x.x）和 [Shell](https://www.gnu.org/software/bash/)。
+-   **功能特点**：
+    -   自动识别物理网卡（支持排除虚拟网卡如 WARP/WireGuard）。
+    -   支持对指定端口（TCP/UDP）进行上传/下载限速。
+    -   支持小数限速设置（例如 0.5 MB/s）。
+    -   提供状态查看和一键清除规则功能。
+    -   自动保存配置，重启后可查看当前状态。
 
-1. 克隆此仓库：
+### 2. BBR 网络优化脚本 (`bbr.sh`)
 
-   ```bash
-   git clone https://github.com/suxayii/Throttle.git
-进入项目目录：
+一键开启 BBR 拥塞控制并优化 Linux 网络内核参数。
 
-bash
+-   **功能特点**：
+    -   自动检测并开启 BBR。
+    -   优化 TCP 窗口、缓冲区等内核参数 (`sysctl.conf`)。
+    -   支持选择队列调度算法 (`fq` 或 `fq_codel`)。
+    -   自动备份原始配置文件。
+    -   内置 `iperf3` 带宽测试功能（可选）。
 
-2. 克隆此仓库：
+### 3. GOST 代理部署脚本 (`gost-proxy.sh`)
 
-   ```bash
-   bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
-进入项目目录：
+用于快速部署和管理 GOST 代理服务的脚本。
 
-bash
+-   **功能特点**：
+    -   一键安装/更新 GOST。
+    -   配置 SOCKS5、HTTP 或双协议代理。
+    -   支持用户名/密码认证。
+    -   自动创建并管理 systemd 服务 (开机自启、重启)。
+    -   内置 BBR 网络优化选项。
+    -   支持管理多个代理节点（添加、暂停、恢复）。
 
-复制
-编辑
+## 使用方法
+
+首先克隆本仓库到您的服务器：
+
+```bash
+git clone https://github.com/suxayii/Throttle.git
 cd Throttle
-安装依赖项：
+chmod +x *.sh
+```
+### 1. 端口限速工具 (`Throttle.sh`)
+**一键运行**:
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/Throttle.sh)
+```
 
-bash
-复制
-编辑
-npm install
-使用方法
-运行 Shell 脚本：
+### 2. BBR 网络优化脚本 (`bbr.sh`)
+**一键运行**:
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/bbr.sh)
+```
 
-bash
-复制
-编辑
-./Throttle.sh
-启动服务器：
+### 3. GOST 代理部署脚本 (`gost-proxy.sh`)
+**一键运行**:
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
+```
 
-bash
-复制
-编辑
-node server.js
-请根据项目的实际功能，添加更多使用示例和说明。
+## 系统要求
 
-文件结构
-项目的主要文件和目录如下：
+-   **操作系统**: 推荐使用 Debian / Ubuntu / CentOS 等主流 Linux 发行版。
+-   **权限**: 脚本需要 root 权限运行。
 
-public/：包含公开的静态资源。
-Throttle.sh：用于 [描述此脚本的功能] 的 Shell 脚本。
-server.js：主服务器文件，负责 [描述服务器的主要功能]。
-package.json：包含项目的元数据和依赖项信息。
-README.md：项目的说明文档。
-贡献
-欢迎贡献者提交问题（Issues）或拉取请求（Pull Requests）。在进行重大更改之前，请先讨论您希望做出的更改，以确保项目的一致性。
+## 许可证
 
-许可证
-此项目使用 MIT 许可证。
-
-go
-复制
-编辑
-
-请根据实际项目情况修改 `[简要描述项目功能]` 和 `[描述此脚本的功能]` 等内容，以使 `README.md` 更加完整和清晰。
+MIT License
