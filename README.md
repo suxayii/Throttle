@@ -21,6 +21,7 @@
 进入项目目录：
 
 bash
+
 2. 克隆此仓库：
 
    ```bash
@@ -28,6 +29,7 @@ bash
 进入项目目录：
 
 bash
+
 复制
 编辑
 cd Throttle
