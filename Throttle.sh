@@ -1,121 +1,223 @@
 #!/bin/bash
 
-# 固定网卡名称
-INTERFACE="eth0"
+# ==========================================
+# Linux 端口限速工具 (v6.1 - WARP/物理网卡修正版)
+# ==========================================
 
-# 检查并安装必要的软件包
-if ! command -v tc &> /dev/null; then
-    echo "tc 命令未找到，请安装 iproute2 包。"
-    exit 1
-fi
-
-if ! command -v iptables &> /dev/null; then
-    echo "iptables 命令未找到，请安装 iptables 包。"
-    exit 1
-fi
-
-# 固定 MARK 值
+CONFIG_DIR="/etc/port-limit"
+CONFIG_FILE="$CONFIG_DIR/settings.conf"
+LOG_FILE="$CONFIG_DIR/port-limit.log"
 MARK=10
 
-# 提示用户选择操作
-echo "请选择操作："
-echo "1. 设置端口限速"
-echo "2. 清除限速规则"
-echo "3. 查看当前配置"
-read -p "请输入选项 (1、2 或 3): " CHOICE
+# --- 核心修复：优化网卡识别逻辑 ---
+# 解释：优先匹配 eth/ens/enp/eno 开头的物理接口，避开 wgcf/tun/cloudflare 等虚拟接口
+detect_interface() {
+    # 1. 尝试直接通过名称获取物理网卡
+    local phy_iface=$(ip -o link show | awk -F': ' '{print $2}' | grep -E "^(eth|ens|enp|eno)[0-9]*" | head -n 1)
+    
+    if [ -n "$phy_iface" ]; then
+        echo "$phy_iface"
+    else
+        # 2. 如果没找到标准名称，尝试获取默认路由，但排除已知的虚拟网卡关键词
+        local route_iface=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')
+        if [[ "$route_iface" =~ ^(wg|tun|ppp|cloudflare|utun) ]]; then
+            # 如果默认路由是虚拟卡，强制回退到 eth0 (绝大多数情况下的保底)
+            echo "eth0"
+        else
+            echo "$route_iface"
+        fi
+    fi
+}
 
-if [ "$CHOICE" -eq 1 ]; then
-    # 设置限速
-    read -p "请输入目标端口(用逗号分隔，如 443,80,22): " PORTS
-    read -p "请输入总带宽 (单位 KBps，只输入数值): " TOTAL_BANDWIDTH
-    read -p "请输入单个 IP 的限速 (单位 KBps，只输入数值): " RATE
-    read -p "请输入允许的最大速率 (单位 KBps，只输入数值): " CEIL
+INTERFACE=$(detect_interface)
+[ -z "$INTERFACE" ] && INTERFACE="eth0"
 
-    echo -e "\n您已设置以下参数："
-    echo "目标端口: $PORTS"
-    echo "总带宽: ${TOTAL_BANDWIDTH}KBps"
-    echo "单个 IP 的限速: ${RATE}KBps"
-    echo "允许的最大速率: ${CEIL}KBps"
-    read -p "确认限速请回车，取消请按 Ctrl+C..."
+# 颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+PLAIN='\033[0m'
 
-    # 清除已有的队列规则
-    sudo tc qdisc del dev $INTERFACE root 2>/dev/null
-    sudo iptables -t mangle -F
+# --- 基础函数 ---
 
-    # 添加根队列规则（HTB调度器）
-    sudo tc qdisc add dev $INTERFACE root handle 1: htb default 30
-    sudo tc class add dev $INTERFACE parent 1: classid 1:1 htb rate "${TOTAL_BANDWIDTH}KBps"
-    sudo tc class add dev $INTERFACE parent 1:1 classid 1:10 htb rate "${RATE}KBps" ceil "${CEIL}KBps"
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
 
-    # 添加 iptables 规则
-    IFS=',' read -ra PORT_ARRAY <<< "$PORTS"
-    for PORT in "${PORT_ARRAY[@]}"; do
-        sudo iptables -t mangle -A PREROUTING -i $INTERFACE -p tcp --dport "$PORT" -j MARK --set-mark $MARK
-        sudo iptables -t mangle -A PREROUTING -i $INTERFACE -p udp --dport "$PORT" -j MARK --set-mark $MARK
-        sudo iptables -t mangle -A OUTPUT -o $INTERFACE -p tcp --sport "$PORT" -j MARK --set-mark $MARK
-        sudo iptables -t mangle -A OUTPUT -o $INTERFACE -p udp --sport "$PORT" -j MARK --set-mark $MARK
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}错误: 必须使用 Root 权限运行${PLAIN}"
+        exit 1
+    fi
+}
+
+check_dependencies() {
+    local missing=()
+    [ ! -x "$(command -v tc)" ] && missing+=("iproute2")
+    [ ! -x "$(command -v iptables)" ] && missing+=("iptables")
+    [ ! -x "$(command -v awk)" ] && missing+=("awk")
+    
+    if [ ${#missing[@]} -ne 0 ]; then
+        if [ -x "$(command -v apt)" ]; then apt update && apt install -y "${missing[@]}"; 
+        elif [ -x "$(command -v yum)" ]; then yum install -y "${missing[@]}"; 
+        else echo "请手动安装: ${missing[*]}"; exit 1; fi
+    fi
+}
+
+init_config() {
+    mkdir -p "$CONFIG_DIR"
+    touch "$LOG_FILE"
+}
+
+# 强制切断输入流，防止 awk 等待导致卡死
+validate_number() {
+    local input=$1
+    if [[ ! "$input" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        return 1
+    fi
+    awk -v val="$input" 'BEGIN { if (val > 0) exit 0; else exit 1 }' < /dev/null
+}
+
+pause() {
+    echo ""
+    read -p "按回车键返回主菜单..."
+}
+
+# --- 核心逻辑 ---
+
+remove_rules() {
+    local quiet=$1
+    if [ -f "$CONFIG_FILE" ]; then
+        local OLD_PORTS=$(grep "^PORTS=" "$CONFIG_FILE" | cut -d'=' -f2)
+        if [ -n "$OLD_PORTS" ]; then
+            IFS=',' read -ra PORT_ARR <<< "$OLD_PORTS"
+            for PORT in "${PORT_ARR[@]}"; do
+                iptables -t mangle -D OUTPUT -o "$INTERFACE" -p tcp --sport "$PORT" -j MARK --set-mark $MARK 2>/dev/null
+                iptables -t mangle -D OUTPUT -o "$INTERFACE" -p udp --sport "$PORT" -j MARK --set-mark $MARK 2>/dev/null
+                if [ -x "$(command -v ip6tables)" ]; then
+                    ip6tables -t mangle -D OUTPUT -o "$INTERFACE" -p tcp --sport "$PORT" -j MARK --set-mark $MARK 2>/dev/null
+                    ip6tables -t mangle -D OUTPUT -o "$INTERFACE" -p udp --sport "$PORT" -j MARK --set-mark $MARK 2>/dev/null
+                fi
+            done
+        fi
+    fi
+    tc qdisc del dev "$INTERFACE" root 2>/dev/null
+    [ "$quiet" != "quiet" ] && log "旧规则已清理 (接口: $INTERFACE)"
+}
+
+add_firewall_rules() {
+    local port=$1
+    iptables -t mangle -A OUTPUT -o "$INTERFACE" -p tcp --sport "$port" -j MARK --set-mark $MARK
+    iptables -t mangle -A OUTPUT -o "$INTERFACE" -p udp --sport "$port" -j MARK --set-mark $MARK
+    if [ -f /proc/net/if_inet6 ] && [ -x "$(command -v ip6tables)" ]; then
+        ip6tables -t mangle -A OUTPUT -o "$INTERFACE" -p tcp --sport "$port" -j MARK --set-mark $MARK 2>/dev/null
+        ip6tables -t mangle -A OUTPUT -o "$INTERFACE" -p udp --sport "$port" -j MARK --set-mark $MARK 2>/dev/null
+    fi
+}
+
+set_limit() {
+    echo -e "${YELLOW}提示：设置将覆盖旧规则。${PLAIN}"
+    echo -e "当前操作网卡: ${GREEN}$INTERFACE${PLAIN} (请确认这是你的物理网卡)"
+    read -p "请输入端口 (逗号分隔): " INPUT_PORTS
+    [ -z "$INPUT_PORTS" ] && return
+    
+    read -p "请输入限制速率 (单位 MB/s, 支持小数, 如 0.5): " INPUT_MB
+    
+    if ! validate_number "$INPUT_MB"; then 
+        echo -e "${RED}错误：数值无效 (必须是大于0的数字)${PLAIN}"
+        pause
+        return
+    fi
+    
+    local LIMIT_KB=$(awk -v val="$INPUT_MB" 'BEGIN {printf "%d", val * 1024}' < /dev/null)
+    local SHOW_MBPS=$(awk -v val="$INPUT_MB" 'BEGIN {printf "%.2f", val * 8}' < /dev/null)
+    
+    if [ "$LIMIT_KB" -lt 1 ]; then LIMIT_KB=1; fi
+    local PHY_LIMIT=$((1000 * 1024)) 
+    
+    remove_rules "quiet"
+    
+    # --- TC 规则区 ---
+    tc qdisc add dev "$INTERFACE" root handle 1: htb default 30
+    tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${PHY_LIMIT}kbps" quantum 200000
+    tc class add dev "$INTERFACE" parent 1: classid 1:10 htb rate "${LIMIT_KB}kbps" ceil "${LIMIT_KB}kbps" burst 15k quantum 3000 prio 1
+    tc class add dev "$INTERFACE" parent 1: classid 1:30 htb rate "${PHY_LIMIT}kbps" ceil "${PHY_LIMIT}kbps" burst 15k quantum 200000 prio 0
+    
+    tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 handle $MARK fw flowid 1:10
+    tc filter add dev "$INTERFACE" protocol ipv6 parent 1:0 prio 1 handle $MARK fw flowid 1:10 2>/dev/null
+
+    # --- 防火墙区 ---
+    IFS=',' read -ra PORT_ARR <<< "$INPUT_PORTS"
+    for PORT in "${PORT_ARR[@]}"; do
+        add_firewall_rules "$PORT"
     done
+    
+    cat > "$CONFIG_FILE" << EOF
+PORTS=$INPUT_PORTS
+LIMIT_MB=$INPUT_MB
+EOF
+    
+    log "已限速: 端口 [$INPUT_PORTS] -> $INPUT_MB MB/s ($LIMIT_KB KB/s) @ $INTERFACE"
+    echo -e "${GREEN}设置成功！${PLAIN}"
+    echo -e "当前限制: ${YELLOW}$INPUT_MB MB/s${PLAIN} (约 $SHOW_MBPS Mbps)"
+    
+    pause
+}
 
-    # 设置过滤规则
-    sudo tc filter add dev $INTERFACE protocol ip parent 1:0 prio 1 handle $MARK fw flowid 1:10
-
-    # 保存配置信息到文件
-    echo "${PORTS}" > /tmp/traffic_ports
-    echo "${TOTAL_BANDWIDTH},${RATE},${CEIL}" > /tmp/traffic_config
-    echo "限速规则已设置。"
-
-elif [ "$CHOICE" -eq 2 ]; then
-    # 清除限速规则
-    echo "请选择清除规则的方式："
-    echo "1. 清除所有限速规则"
-    echo "2. 输入端口清除指定规则"
-    read -p "请输入选项 (1 或 2): " CLEAR_CHOICE
-
-    if [ "$CLEAR_CHOICE" -eq 1 ]; then
-        # 清除所有规则
-        sudo tc qdisc del dev $INTERFACE root 2>/dev/null
-        sudo iptables -t mangle -F
-        sudo rm -f /tmp/traffic_ports /tmp/traffic_config
-        echo "已清除所有限速规则。"
-
-    elif [ "$CLEAR_CHOICE" -eq 2 ]; then
-        # 清除指定端口规则
-        echo "当前限速端口："
-        iptables -t mangle -L PREROUTING -v -n | grep "MARK set 0x$MARK" | awk '{print $13}' | sort -u
-        read -p "请输入要解除限速的端口(用逗号分隔): " REMOVE_PORTS
-
-        IFS=',' read -ra REMOVE_PORT_ARRAY <<< "$REMOVE_PORTS"
-        for PORT in "${REMOVE_PORT_ARRAY[@]}"; do
-            sudo iptables -t mangle -D PREROUTING -i $INTERFACE -p tcp --dport "$PORT" -j MARK --set-mark $MARK
-            sudo iptables -t mangle -D PREROUTING -i $INTERFACE -p udp --dport "$PORT" -j MARK --set-mark $MARK
-            sudo iptables -t mangle -D OUTPUT -o $INTERFACE -p tcp --sport "$PORT" -j MARK --set-mark $MARK
-            sudo iptables -t mangle -D OUTPUT -o $INTERFACE -p udp --sport "$PORT" -j MARK --set-mark $MARK
-        done
-
-        echo "已解除端口 $REMOVE_PORTS 的限速规则。"
+show_status() {
+    echo -e "${YELLOW}--- 当前配置 ($INTERFACE) ---${PLAIN}"
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        echo "监听端口: $PORTS"
+        local CUR_MBPS=$(awk -v val="$LIMIT_MB" 'BEGIN {printf "%.2f", val * 8}' < /dev/null)
+        echo "限制速率: $LIMIT_MB MB/s (约 $CUR_MBPS Mbps)"
     else
-        echo "无效选项，请输入 1 或 2"
+        echo "无配置文件"
     fi
+    
+    echo -e "\n${YELLOW}--- 流量统计 ---${PLAIN}"
+    tc -s class show dev "$INTERFACE" | grep -A 5 "class htb 1:10"
+    
+    echo -e "\n${YELLOW}--- 命中包数 (pkts) ---${PLAIN}"
+    iptables -t mangle -L OUTPUT -v -n | grep "MARK set 0x$((MARK))"
+    
+    pause
+}
 
-elif [ "$CHOICE" -eq 3 ]; then
-    # 查看当前配置
-    if [ -f /tmp/traffic_config ] && [ -f /tmp/traffic_ports ]; then
-        CONFIG=$(cat /tmp/traffic_config)
-        PORTS=$(cat /tmp/traffic_ports)
-        IFS=',' read -r TOTAL_BANDWIDTH RATE CEIL <<< "$CONFIG"
-        echo "当前限速配置："
-        echo "目标端口: $PORTS"
-        echo "总带宽: ${TOTAL_BANDWIDTH}KBps"
-        echo "单个 IP 限速: ${RATE}KBps"
-        echo "允许的最大速率: ${CEIL}KBps"
-    else
-        echo "没有找到有效的限速配置文件。"
-    fi
+clear_all() {
+    remove_rules
+    rm -f "$CONFIG_FILE"
+    echo -e "${GREEN}已清除所有限制。${PLAIN}"
+    pause
+}
 
-    echo "限速端口:"
-    iptables -t mangle -L PREROUTING -v -n | grep "MARK set 0x$MARK" | awk '{print $13}' | sort -u
+main() {
+    check_root
+    check_dependencies
+    init_config
+    trap "exit 1" INT
 
-else
-    echo "无效选项，请输入 1、2 或 3"
-    exit 1
-fi
+    while true; do
+        clear
+        echo "=================================="
+        echo "    Linux 端口限速工具 (v6.1)"
+        echo "    当前操作网卡: ${GREEN}$INTERFACE${PLAIN}"
+        echo "=================================="
+        echo " 1. 设置/更新 端口限速 (支持小数)"
+        echo " 2. 查看状态 (排查故障)"
+        echo " 3. 清除限制"
+        echo " 0. 退出"
+        echo "=================================="
+        read -p "请输入选项 [0-3]: " CHOICE
+        
+        case $CHOICE in
+            1) set_limit ;;
+            2) show_status ;;
+            3) clear_all ;;
+            0) exit 0 ;;
+            *) echo "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
+main
