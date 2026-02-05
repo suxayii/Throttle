@@ -106,7 +106,6 @@ check_dependencies() {
             exit 1
         fi
     fi
-    fi
 }
 
 # --- 检查更新 ---
@@ -120,11 +119,11 @@ check_update() {
         return
     fi
     
-    local latest_ver=$(echo "$latest_script" | grep -oP 'VERSION="\K[^"]+' || echo "")
+    local latest_ver=$(echo "$latest_script" | sed -n 's/.*VERSION="\([^"]*\)".*/\1/p' | head -1)
     
     if [[ -z "$latest_ver" ]]; then
-         # 尝试从注释中获取
-         latest_ver=$(echo "$latest_script" | grep -oP 'v\K[0-9.]+(?=\s+-)' | head -1 || echo "")
+         # 尝试从注释中获取 (v7.2 - xxx)
+         latest_ver=$(echo "$latest_script" | sed -n 's/.*v\([0-9.]*\)\s*-.*/\1/p' | head -1)
     fi
     
     if [[ -n "$latest_ver" && "$latest_ver" != "$VERSION" ]]; then
