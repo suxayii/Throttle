@@ -1,1170 +1,1418 @@
-#!/usr/bin/env bash
-#
-# install_server.sh - hysteria server install script
-# Try `install_server.sh --help` for usage.
-#
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2023 Aperture Internet Laboratory
-#
+#!/bin/bash
+# =========================================================
+# BBR + 网络优化自动配置脚本 (v7.2 - 快捷指令版)
+# - 支持 BBRv3 检测
+# - 支持多种队列算法 (fq, fq_codel, fq_pie, cake)
+# - 自动模块加载与持久化
+# - 支持非交互模式 (-y)
+# - Hysteria2 / VLESS-WS / VLESS-XTLS 协议专用优化
+# - 🤖 智能自动调优 (基于 BDP 动态计算带宽延迟积)
+# - 🚀 自动安装 'bb' 快捷指令
+# =========================================================
+set -Eeuo pipefail
 
-set -e
+# --- 变量定义 ---
+LOG_FILE="/var/log/bbr-optimize.log"
+LIMITS_CONF="/etc/security/limits.conf"
+SYSTEMD_CONF="/etc/systemd/system.conf"
+BACKUP_DIR="/etc/sysctl.d/backup"
+ORIGINAL_BACKUP_DIR="$BACKUP_DIR/original"
+HISTORY_BACKUP_DIR="$BACKUP_DIR/history"
+VALID_QDISC=("fq" "fq_codel" "fq_pie" "cake")
+DEFAULT_QDISC="fq"
+SYSCTL_CONF="/etc/sysctl.d/99-bbr.conf"
+MODULES_CONF="/etc/modules-load.d/qdisc.conf"
+AUTO_YES=false
+MAX_HISTORY_BACKUPS=10
+VERSION="7.2"
+UPDATE_URL="https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/bbr.sh"
 
+# --- 颜色 ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+PLAIN='\033[0m'
 
-###
-# SCRIPT CONFIGURATION
-###
-
-# Basename of this script
-SCRIPT_NAME="$(basename "$0")"
-
-# Command line arguments of this script
-SCRIPT_ARGS=("$@")
-
-# Path for installing executable
-EXECUTABLE_INSTALL_PATH="/usr/local/bin/hysteria"
-
-# Paths to install systemd files
-SYSTEMD_SERVICES_DIR="/etc/systemd/system"
-
-# Directory to store hysteria config file
-CONFIG_DIR="/etc/hysteria"
-
-# URLs of GitHub
-REPO_URL="https://github.com/apernet/hysteria"
-
-# URL of Hysteria 2 API
-HY2_API_BASE_URL="https://api.hy2.io/v1"
-
-# curl command line flags.
-# To using a proxy, please specify ALL_PROXY in the environ variable, such like:
-# export ALL_PROXY=socks5h://192.0.2.1:1080
-CURL_FLAGS=(-L -f -q --retry 5 --retry-delay 10 --retry-max-time 60)
-
-
-###
-# AUTO DETECTED GLOBAL VARIABLE
-###
-
-# Package manager
-PACKAGE_MANAGEMENT_INSTALL="${PACKAGE_MANAGEMENT_INSTALL:-}"
-
-# Operating System of current machine, supported: linux
-OPERATING_SYSTEM="${OPERATING_SYSTEM:-}"
-
-# Architecture of current machine, supported: 386, amd64, arm, arm64, mipsle, s390x
-ARCHITECTURE="${ARCHITECTURE:-}"
-
-# User for running hysteria
-HYSTERIA_USER="${HYSTERIA_USER:-}"
-
-# Directory for ACME certificates storage
-HYSTERIA_HOME_DIR="${HYSTERIA_HOME_DIR:-}"
-
-# SELinux context of systemd unit files
-SECONTEXT_SYSTEMD_UNIT="${SECONTEXT_SYSTEMD_UNIT:-}"
-
-
-###
-# ARGUMENTS
-###
-
-# Supported operation: install, remove, check_update
-OPERATION=
-
-# User specified version to install
-VERSION=
-
-# Force install even if installed
-FORCE=
-
-# User specified binary to install
-LOCAL_FILE=
-
-
-###
-# COMMAND REPLACEMENT & UTILITIES
-###
-
-has_command() {
-  local _command=$1
-
-  type -P "$_command" > /dev/null 2>&1
+# --- 基础函数 ---
+log() {
+    echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-curl() {
-  command curl "${CURL_FLAGS[@]}" "$@"
+show_help() {
+    echo "用法: $0 [-y] [auto|fq|fq_codel|fq_pie|cake|hysteria2|vless-ws|vless-xtls|mixed|restore]"
+    echo ""
+    echo "🤖 智能模式:"
+    echo "  auto                         自动检测硬件/网络并优化 (推荐)"
+    echo ""
+    echo "通用优化选项:"
+    echo "  fq, fq_codel, fq_pie, cake  选择队列调度算法 (BBR + TCP)"
+    echo ""
+    echo "协议专用优化:"
+    echo "  hysteria2                    Hysteria2 专用优化 (UDP/QUIC)"
+    echo "  vless-ws                     VLESS-WS 专用优化 (TCP/WebSocket)"
+    echo "  vless-xtls                   VLESS-XTLS/Reality 专用优化 (TCP/TLS + UDP透传)"
+    echo "  mixed                        混合模式 (全协议兼容)"
+    echo ""
+    echo "其他选项:"
+    echo "  restore                      恢复原始配置"
+    echo "  -y                           非交互模式，跳过所有确认提示"
+    echo "  -h, --help                   显示此帮助信息"
+    echo ""
+    echo "示例:"
+    echo "  $0                 # 交互式菜单"
+    echo "  $0 auto            # 🤖 智能自动调优"
+    echo "  $0 -y auto         # 非交互智能调优"
+    echo "  $0 fq              # 直接使用 fq 算法"
+    echo "  $0 hysteria2       # Hysteria2 专用优化"
+    echo "  $0 ws-cdn          # VLESS-WS (Cloudflare CDN) 优化"
 }
 
-mktemp() {
-  command mktemp "$@" "/tmp/hyservinst.XXXXXXXXXX"
-}
-
-tput() {
-  if has_command tput; then
-    command tput "$@"
-  fi
-}
-
-tred() {
-  tput setaf 1
-}
-
-tgreen() {
-  tput setaf 2
-}
-
-tyellow() {
-  tput setaf 3
-}
-
-tblue() {
-  tput setaf 4
-}
-
-taoi() {
-  tput setaf 6
-}
-
-tbold() {
-  tput bold
-}
-
-treset() {
-  tput sgr0
-}
-
-note() {
-  local _msg="$1"
-
-  echo -e "$SCRIPT_NAME: $(tbold)note: $_msg$(treset)"
-}
-
-warning() {
-  local _msg="$1"
-
-  echo -e "$SCRIPT_NAME: $(tyellow)warning: $_msg$(treset)"
-}
-
-error() {
-  local _msg="$1"
-
-  echo -e "$SCRIPT_NAME: $(tred)error: $_msg$(treset)"
-}
-
-has_prefix() {
-    local _s="$1"
-    local _prefix="$2"
-
-    if [[ -z "$_prefix" ]]; then
-        return 0
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}❌ 错误: 必须使用 Root 权限运行${PLAIN}"
+        exit 1
     fi
+}
 
-    if [[ -z "$_s" ]]; then
-        return 1
+check_kernel() {
+    local kernel_version=$(uname -r | cut -d. -f1-2)
+    local major=$(echo "$kernel_version" | cut -d. -f1)
+    local minor=$(echo "$kernel_version" | cut -d. -f2)
+    
+    if [[ $major -lt 4 ]] || [[ $major -eq 4 && $minor -lt 9 ]]; then
+        echo -e "${RED}❌ 错误: 内核版本 $kernel_version 不支持 BBR (需要 4.9+)${PLAIN}"
+        echo -e "${YELLOW}提示: 请先升级内核后再运行此脚本${PLAIN}"
+        exit 1
     fi
-
-    [[ "x$_s" != "x${_s#"$_prefix"}" ]]
+    log "✅ 内核版本检查通过: $kernel_version"
 }
 
-generate_random_password() {
-  dd if=/dev/random bs=18 count=1 status=none | base64
-}
-
-systemctl() {
-  if [[ "x$FORCE_NO_SYSTEMD" == "x2" ]] || ! has_command systemctl; then
-    warning "Ignored systemd command: systemctl $@"
-    return
-  fi
-
-  command systemctl "$@"
-}
-
-chcon() {
-  if ! has_command chcon || [[ "x$FORCE_NO_SELINUX" == "x1" ]]; then
-    return
-  fi
-
-  command chcon "$@"
-}
-
-get_systemd_version() {
-  if ! has_command systemctl; then
-    return
-  fi
-
-  command systemctl --version | head -1 | cut -d ' ' -f 2
-}
-
-systemd_unit_working_directory() {
-  local _systemd_version="$(get_systemd_version || true)"
-
-  # WorkingDirectory=~ requires systemd v227 or later.
-  # (released on Oct 2015, only CentOS 7 use an earlier version)
-  # ref: systemd/systemd@5f5d8eab1f2f5f5e088bc301533b3e4636de96c7
-  if [[ -n "$_systemd_version" && "$_systemd_version" -lt "227" ]]; then
-    echo "$HYSTERIA_HOME_DIR"
-    return
-  fi
-
-  echo "~"
-}
-
-get_selinux_context() {
-  local _file="$1"
-
-  local _lsres="$(ls -dZ "$_file" | head -1)"
-  local _sectx=''
-  case "$(echo "$_lsres" | wc -w)" in
-    2)
-      _sectx="$(echo "$_lsres" | cut -d ' ' -f 1)"
-      ;;
-    5)
-      _sectx="$(echo "$_lsres" | cut -d ' ' -f 4)"
-      ;;
-    *)
-      ;;
-  esac
-
-  if [[ "x$_sectx" == "x?" ]]; then
-    _sectx=""
-  fi
-
-  echo "$_sectx"
-}
-
-show_argument_error_and_exit() {
-  local _error_msg="$1"
-
-  error "$_error_msg"
-  echo "Try \"$0 --help\" for usage." >&2
-  exit 22
-}
-
-install_content() {
-  local _install_flags="$1"
-  local _content="$2"
-  local _destination="$3"
-  local _overwrite="$4"
-
-  local _tmpfile="$(mktemp)"
-
-  echo -ne "Install $_destination ... "
-  echo "$_content" > "$_tmpfile"
-  if [[ -z "$_overwrite" && -e "$_destination" ]]; then
-    echo -e "exists"
-  elif install "$_install_flags" "$_tmpfile" "$_destination"; then
-    echo -e "ok"
-  fi
-
-  rm -f "$_tmpfile"
-}
-
-remove_file() {
-  local _target="$1"
-
-  echo -ne "Remove $_target ... "
-  if rm "$_target"; then
-    echo -e "ok"
-  fi
-}
-
-exec_sudo() {
-  # exec sudo with configurable environ preserved.
-  local _saved_ifs="$IFS"
-  IFS=$'\n'
-  local _preserved_env=(
-    $(env | grep "^PACKAGE_MANAGEMENT_INSTALL=" || true)
-    $(env | grep "^OPERATING_SYSTEM=" || true)
-    $(env | grep "^ARCHITECTURE=" || true)
-    $(env | grep "^HYSTERIA_\w*=" || true)
-    $(env | grep "^SECONTEXT_SYSTEMD_UNIT=" || true)
-    $(env | grep "^FORCE_\w*=" || true)
-  )
-  IFS="$_saved_ifs"
-
-  exec sudo env \
-    "${_preserved_env[@]}" \
-    "$@"
-}
-
-detect_package_manager() {
-  if [[ -n "$PACKAGE_MANAGEMENT_INSTALL" ]]; then
-    return 0
-  fi
-
-  if has_command apt; then
-    apt update
-    PACKAGE_MANAGEMENT_INSTALL='apt -y --no-install-recommends install'
-    return 0
-  fi
-
-  if has_command dnf; then
-    PACKAGE_MANAGEMENT_INSTALL='dnf -y install'
-    return 0
-  fi
-
-  if has_command yum; then
-    PACKAGE_MANAGEMENT_INSTALL='yum -y install'
-    return 0
-  fi
-
-  if has_command zypper; then
-    PACKAGE_MANAGEMENT_INSTALL='zypper install -y --no-recommends'
-    return 0
-  fi
-
-  if has_command pacman; then
-    PACKAGE_MANAGEMENT_INSTALL='pacman -Syu --noconfirm'
-    return 0
-  fi
-
-  return 1
-}
-
-install_software() {
-  local _package_name="$1"
-
-  if ! detect_package_manager; then
-    error "Supported package manager is not detected, please install the following package manually:"
-    echo
-    echo -e "\t* $_package_name"
-    echo
-    exit 65
-  fi
-
-  echo "Installing missing dependence '$_package_name' with '$PACKAGE_MANAGEMENT_INSTALL' ... "
-  if $PACKAGE_MANAGEMENT_INSTALL "$_package_name"; then
-    echo "ok"
-  else
-    error "Cannot install '$_package_name' with detected package manager, please install it manually."
-    exit 65
-  fi
-}
-
-is_user_exists() {
-  local _user="$1"
-
-  id "$_user" > /dev/null 2>&1
-}
-
-rerun_with_sudo() {
-  if ! has_command sudo; then
-    return 13
-  fi
-
-  local _target_script
-
-  if has_prefix "$0" "/dev/" || has_prefix "$0" "/proc/"; then
-    local _tmp_script="$(mktemp)"
-    chmod +x "$_tmp_script"
-
-    if has_command curl; then
-      curl -o "$_tmp_script" 'https://get.hy2.sh/'
-    elif has_command wget; then
-      wget -O "$_tmp_script" 'https://get.hy2.sh'
-    else
-      return 127
-    fi
-
-    _target_script="$_tmp_script"
-  else
-    _target_script="$0"
-  fi
-
-  note "Re-running this script with sudo. You can also specify FORCE_NO_ROOT=1 to force this script to run as the current user."
-  exec_sudo "$_target_script" "${SCRIPT_ARGS[@]}"
-}
-
-check_permission() {
-  if [[ "$UID" -eq '0' ]]; then
-    return
-  fi
-
-  note "The user running this script is not root."
-
-  case "$FORCE_NO_ROOT" in
-    '1')
-      warning "FORCE_NO_ROOT=1 detected, we will proceed without root, but you may get insufficient privileges errors."
-      ;;
-    *)
-      if ! rerun_with_sudo; then
-        error "Please run this script with root or specify FORCE_NO_ROOT=1 to force this script to run as the current user."
-        exit 13
-      fi
-      ;;
-  esac
-}
-
-check_environment_operating_system() {
-  if [[ -n "$OPERATING_SYSTEM" ]]; then
-    warning "OPERATING_SYSTEM=$OPERATING_SYSTEM detected, operating system detection will not be performed."
-    return
-  fi
-
-  if [[ "x$(uname)" == "xLinux" ]]; then
-    OPERATING_SYSTEM=linux
-    return
-  fi
-
-  error "This script only supports Linux."
-  note "Specify OPERATING_SYSTEM=[linux|darwin|freebsd|windows] to bypass this check and force this script to run on this $(uname)."
-  exit 95
-}
-
-check_environment_architecture() {
-  if [[ -n "$ARCHITECTURE" ]]; then
-    warning "ARCHITECTURE=$ARCHITECTURE detected, architecture detection will not be performed."
-    return
-  fi
-
-  case "$(uname -m)" in
-    'i386' | 'i686')
-      ARCHITECTURE='386'
-      ;;
-    'amd64' | 'x86_64')
-      ARCHITECTURE='amd64'
-      ;;
-    'armv5tel' | 'armv6l' | 'armv7' | 'armv7l')
-      ARCHITECTURE='arm'
-      ;;
-    'armv8' | 'aarch64')
-      ARCHITECTURE='arm64'
-      ;;
-    'mips' | 'mipsle' | 'mips64' | 'mips64le')
-      ARCHITECTURE='mipsle'
-      ;;
-    's390x')
-      ARCHITECTURE='s390x'
-      ;;
-    'loongarch64')
-      ARCHITECTURE='loong64'
-      ;;
-    *)
-      error "The architecture '$(uname -a)' is not supported."
-      note "Specify ARCHITECTURE=<architecture> to bypass this check and force this script to run on this $(uname -m)."
-      exit 8
-      ;;
-  esac
-}
-
-check_environment_systemd() {
-  if [[ -d "/run/systemd/system" ]] || grep -q systemd <(ls -l /sbin/init); then
-    return
-  fi
-
-  case "$FORCE_NO_SYSTEMD" in
-    '1')
-      warning "FORCE_NO_SYSTEMD=1, we will proceed as normal even if systemd is not detected."
-      ;;
-    '2')
-      warning "FORCE_NO_SYSTEMD=2, we will proceed but skip all systemd related commands."
-      ;;
-    *)
-      error "This script only supports Linux distributions with systemd."
-      note "Specify FORCE_NO_SYSTEMD=1 to disable this check and force this script to run as if systemd exists."
-      note "Specify FORCE_NO_SYSTEMD=2 to disable this check and skip all systemd related commands."
-      ;;
-  esac
-}
-
-check_environment_selinux() {
-  if ! has_command getenforce; then
-    return
-  fi
-
-  note "SELinux is detected"
-
-  if [[ "x$FORCE_NO_SELINUX" == "x1" ]]; then
-    warning "FORCE_NO_SELINUX=1, we will skip all SELinux related commands."
-    return
-  fi
-
-  if [[ -z "$SECONTEXT_SYSTEMD_UNIT" ]]; then
-    if [[ -z "$FORCE_NO_SYSTEMD" ]] && [[ -e "$SYSTEMD_SERVICES_DIR" ]]; then
-      local _sectx="$(get_selinux_context "$SYSTEMD_SERVICES_DIR")"
-      if [[ -z "$_sectx" ]]; then
-        warning "Failed to obtain SEContext of $SYSTEMD_SERVICES_DIR"
-      else
-        SECONTEXT_SYSTEMD_UNIT="$_sectx"
-      fi
-    fi
-  fi
-}
-
-check_environment_curl() {
-  if has_command curl; then
-    return
-  fi
-
-  install_software curl
-}
-
-check_environment_grep() {
-  if has_command grep; then
-    return
-  fi
-
-  install_software grep
-}
-
-check_environment() {
-  check_environment_operating_system
-  check_environment_architecture
-  check_environment_systemd
-  check_environment_selinux
-  check_environment_curl
-  check_environment_grep
-}
-
-vercmp_segment() {
-  local _lhs="$1"
-  local _rhs="$2"
-
-  if [[ "x$_lhs" == "x$_rhs" ]]; then
-    echo 0
-    return
-  fi
-  if [[ -z "$_lhs" ]]; then
-    echo -1
-    return
-  fi
-  if [[ -z "$_rhs" ]]; then
-    echo 1
-    return
-  fi
-
-  local _lhs_num="${_lhs//[A-Za-z]*/}"
-  local _rhs_num="${_rhs//[A-Za-z]*/}"
-
-  if [[ "x$_lhs_num" == "x$_rhs_num" ]]; then
-    echo 0
-    return
-  fi
-  if [[ -z "$_lhs_num" ]]; then
-    echo -1
-    return
-  fi
-  if [[ -z "$_rhs_num" ]]; then
-    echo 1
-    return
-  fi
-  local _numcmp=$(($_lhs_num - $_rhs_num))
-  if [[ "$_numcmp" -ne 0 ]]; then
-    echo "$_numcmp"
-    return
-  fi
-
-  local _lhs_suffix="${_lhs#"$_lhs_num"}"
-  local _rhs_suffix="${_rhs#"$_rhs_num"}"
-
-  if [[ "x$_lhs_suffix" == "x$_rhs_suffix" ]]; then
-    echo 0
-    return
-  fi
-  if [[ -z "$_lhs_suffix" ]]; then
-    echo 1
-    return
-  fi
-  if [[ -z "$_rhs_suffix" ]]; then
-    echo -1
-    return
-  fi
-  if [[ "$_lhs_suffix" < "$_rhs_suffix" ]]; then
-    echo -1
-    return
-  fi
-  echo 1
-}
-
-vercmp() {
-  local _lhs=${1#v}
-  local _rhs=${2#v}
-
-  while [[ -n "$_lhs" && -n "$_rhs" ]]; do
-    local _clhs="${_lhs/.*/}"
-    local _crhs="${_rhs/.*/}"
-
-    local _segcmp="$(vercmp_segment "$_clhs" "$_crhs")"
-    if [[ "$_segcmp" -ne 0 ]]; then
-      echo "$_segcmp"
-      return
-    fi
-
-    _lhs="${_lhs#"$_clhs"}"
-    _lhs="${_lhs#.}"
-    _rhs="${_rhs#"$_crhs"}"
-    _rhs="${_rhs#.}"
-  done
-
-  if [[ "x$_lhs" == "x$_rhs" ]]; then
-    echo 0
-    return
-  fi
-
-  if [[ -z "$_lhs" ]]; then
-    echo -1
-    return
-  fi
-
-  if [[ -z "$_rhs" ]]; then
-    echo 1
-    return
-  fi
-
-  return
-}
-
-check_hysteria_user() {
-  local _default_hysteria_user="$1"
-
-  if [[ -n "$HYSTERIA_USER" ]]; then
-    return
-  fi
-
-  if [[ ! -e "$SYSTEMD_SERVICES_DIR/hysteria-server.service" ]]; then
-    HYSTERIA_USER="$_default_hysteria_user"
-    return
-  fi
-
-  HYSTERIA_USER="$(grep -o '^User=\w*' "$SYSTEMD_SERVICES_DIR/hysteria-server.service" | tail -1 | cut -d '=' -f 2 || true)"
-
-  if [[ -z "$HYSTERIA_USER" ]]; then
-    HYSTERIA_USER="$_default_hysteria_user"
-  fi
-}
-
-check_hysteria_homedir() {
-  local _default_hysteria_homedir="$1"
-
-  if [[ -n "$HYSTERIA_HOME_DIR" ]]; then
-    return
-  fi
-
-  if ! is_user_exists "$HYSTERIA_USER"; then
-    HYSTERIA_HOME_DIR="$_default_hysteria_homedir"
-    return
-  fi
-
-  HYSTERIA_HOME_DIR="$(eval echo ~"$HYSTERIA_USER")"
-}
-
-
-###
-# ARGUMENTS PARSER
-###
-
-show_usage_and_exit() {
-  echo
-  echo -e "\t$(tbold)$SCRIPT_NAME$(treset) - hysteria server install script"
-  echo
-  echo -e "Usage:"
-  echo
-  echo -e "$(tbold)Install hysteria$(treset)"
-  echo -e "\t$0 [ -f | -l <file> | --version <version> ]"
-  echo -e "Flags:"
-  echo -e "\t-f, --force\tForce re-install latest or specified version even if it has been installed."
-  echo -e "\t-l, --local <file>\tInstall specified hysteria binary instead of download it."
-  echo -e "\t--version <version>\tInstall specified version instead of the latest."
-  echo
-  echo -e "$(tbold)Remove hysteria$(treset)"
-  echo -e "\t$0 --remove"
-  echo
-  echo -e "$(tbold)Check for the update$(treset)"
-  echo -e "\t$0 -c"
-  echo -e "\t$0 --check"
-  echo
-  echo -e "$(tbold)Show this help$(treset)"
-  echo -e "\t$0 -h"
-  echo -e "\t$0 --help"
-  exit 0
-}
-
-parse_arguments() {
-  while [[ "$#" -gt '0' ]]; do
-    case "$1" in
-      '--remove')
-        if [[ -n "$OPERATION" && "$OPERATION" != 'remove' ]]; then
-          show_argument_error_and_exit "Option '--remove' is in conflict with other options."
+check_dependencies() {
+    local missing=()
+    for cmd in curl ip sysctl awk sed grep modprobe; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing+=("$cmd")
         fi
-        OPERATION='remove'
-        ;;
-      '--version')
-        VERSION="$2"
-        if [[ -z "$VERSION" ]]; then
-          show_argument_error_and_exit "Please specify the version for option '--version'."
+    done
+    
+    if [ ${#missing[@]} -ne 0 ]; then
+        log "正在安装依赖: ${missing[*]}"
+        if command -v apt-get &> /dev/null; then
+            apt-get update -qq && apt-get install -y -qq "${missing[@]}"
+        elif command -v yum &> /dev/null; then
+            yum install -y -q "${missing[@]}"
+        else
+            echo -e "${RED}❌ 请手动安装依赖: ${missing[*]}${PLAIN}"
+            exit 1
         fi
-        shift
-        if ! has_prefix "$VERSION" 'v'; then
-          show_argument_error_and_exit "Version numbers should begin with 'v' (such as 'v2.0.0'), got '$VERSION'"
-        fi
-        ;;
-      '-c' | '--check')
-        if [[ -n "$OPERATION" && "$OPERATION" != 'check' ]]; then
-          show_argument_error_and_exit "Option '-c' or '--check' is in conflict with other options."
-        fi
-        OPERATION='check_update'
-        ;;
-      '-f' | '--force')
-        FORCE='1'
-        ;;
-      '-h' | '--help')
-        show_usage_and_exit
-        ;;
-      '-l' | '--local')
-        LOCAL_FILE="$2"
-        if [[ -z "$LOCAL_FILE" ]]; then
-          show_argument_error_and_exit "Please specify the local binary to install for option '-l' or '--local'."
-        fi
-        break
-        ;;
-      *)
-        show_argument_error_and_exit "Unknown option '$1'"
-        ;;
-    esac
-    shift
-  done
-
-  if [[ -z "$OPERATION" ]]; then
-    OPERATION='install'
-  fi
-
-  # validate arguments
-  case "$OPERATION" in
-    'install')
-      if [[ -n "$VERSION" && -n "$LOCAL_FILE" ]]; then
-        show_argument_error_and_exit '--version and --local cannot be used together.'
-      fi
-      ;;
-    *)
-      if [[ -n "$VERSION" ]]; then
-        show_argument_error_and_exit "--version is only valid for install operation."
-      fi
-      if [[ -n "$LOCAL_FILE" ]]; then
-        show_argument_error_and_exit "--local is only valid for install operation."
-      fi
-      ;;
-  esac
-}
-
-
-###
-# FILE TEMPLATES
-###
-
-# /etc/systemd/system/hysteria-server.service
-tpl_hysteria_server_service_base() {
-  local _config_name="$1"
-
-  cat << EOF
-[Unit]
-Description=Hysteria Server Service (${_config_name}.yaml)
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$EXECUTABLE_INSTALL_PATH server --config ${CONFIG_DIR}/${_config_name}.yaml
-WorkingDirectory=$(systemd_unit_working_directory)
-User=$HYSTERIA_USER
-Group=$HYSTERIA_USER
-Environment=HYSTERIA_LOG_LEVEL=info
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-# /etc/systemd/system/hysteria-server.service
-tpl_hysteria_server_service() {
-  tpl_hysteria_server_service_base 'config'
-}
-
-# /etc/systemd/system/hysteria-server@.service
-tpl_hysteria_server_x_service() {
-  tpl_hysteria_server_service_base '%i'
-}
-
-# /etc/hysteria/config.yaml
-tpl_etc_hysteria_config_yaml() {
-  cat << EOF
-# listen: :443
-
-acme:
-  domains:
-    - your.domain.net
-  email: your@email.com
-
-auth:
-  type: password
-  password: $(generate_random_password)
-
-masquerade:
-  type: proxy
-  proxy:
-    url: https://news.ycombinator.com/
-    rewriteHost: true
-EOF
-}
-
-
-###
-# SYSTEMD
-###
-
-get_running_services() {
-  if [[ "x$FORCE_NO_SYSTEMD" == "x2" ]]; then
-    return
-  fi
-
-  systemctl list-units --state=active --plain --no-legend \
-    | grep -o "hysteria-server@*[^\s]*.service" || true
-}
-
-restart_running_services() {
-  if [[ "x$FORCE_NO_SYSTEMD" == "x2" ]]; then
-    return
-  fi
-
-  echo "Restarting running service ... "
-
-  for service in $(get_running_services); do
-    echo -ne "Restarting $service ... "
-    systemctl restart "$service"
-    echo "done"
-  done
-}
-
-stop_running_services() {
-  if [[ "x$FORCE_NO_SYSTEMD" == "x2" ]]; then
-    return
-  fi
-
-  echo "Stopping running service ... "
-
-  for service in $(get_running_services); do
-    echo -ne "Stopping $service ... "
-    systemctl stop "$service"
-    echo "done"
-  done
-}
-
-
-###
-# HYSTERIA & GITHUB API
-###
-
-is_hysteria_installed() {
-  # RETURN VALUE
-  # 0: hysteria is installed
-  # 1: hysteria is not installed
-
-  if [[ -f "$EXECUTABLE_INSTALL_PATH" || -h "$EXECUTABLE_INSTALL_PATH" ]]; then
-    return 0
-  fi
-  return 1
-}
-
-is_hysteria1_version() {
-  local _version="$1"
-
-  has_prefix "$_version" "v1." || has_prefix "$_version" "v0."
-}
-
-get_installed_version() {
-  if is_hysteria_installed; then
-    if "$EXECUTABLE_INSTALL_PATH" version > /dev/null 2>&1; then
-      "$EXECUTABLE_INSTALL_PATH" version | grep '^Version' | grep -o 'v[.0-9]*'
-    elif "$EXECUTABLE_INSTALL_PATH" -v > /dev/null 2>&1; then
-      # hysteria 1
-      "$EXECUTABLE_INSTALL_PATH" -v | cut -d ' ' -f 3
     fi
-  fi
 }
 
-get_latest_version() {
-  if [[ -n "$VERSION" ]]; then
-    echo "$VERSION"
-    return
-  fi
-
-  local _tmpfile=$(mktemp)
-  if ! curl -sS "$HY2_API_BASE_URL/update?cver=installscript&plat=${OPERATING_SYSTEM}&arch=${ARCHITECTURE}&chan=release&side=server" -o "$_tmpfile"; then
-    error "Failed to get the latest version from Hysteria 2 API, please check your network and try again."
-    exit 11
-  fi
-
-  local _latest_version=$(grep -oP '"lver":\s*\K"v.*?"' "$_tmpfile" | head -1)
-  _latest_version=${_latest_version#'"'}
-  _latest_version=${_latest_version%'"'}
-
-  if [[ -n "$_latest_version" ]]; then
-    echo "$_latest_version"
-  fi
-
-  rm -f "$_tmpfile"
-}
-
-download_hysteria() {
-  local _version="$1"
-  local _destination="$2"
-
-  local _download_url="$REPO_URL/releases/download/app/$_version/hysteria-$OPERATING_SYSTEM-$ARCHITECTURE"
-  echo "Downloading hysteria binary: $_download_url ..."
-  if ! curl -R -H 'Cache-Control: no-cache' "$_download_url" -o "$_destination"; then
-    error "Download failed, please check your network and try again."
-    return 11
-  fi
-  return 0
-}
-
+# --- 检查更新 ---
 check_update() {
-  # RETURN VALUE
-  # 0: update available
-  # 1: installed version is latest
-
-  echo -ne "Checking for installed version ... "
-  local _installed_version="$(get_installed_version)"
-  if [[ -n "$_installed_version" ]]; then
-    echo "$_installed_version"
-  else
-    echo "not installed"
-  fi
-
-  echo -ne "Checking for latest version ... "
-  local _latest_version="$(get_latest_version)"
-  if [[ -n "$_latest_version" ]]; then
-    echo "$_latest_version"
-    VERSION="$_latest_version"
-  else
-    echo "failed"
-    return 1
-  fi
-
-  local _vercmp="$(vercmp "$_installed_version" "$_latest_version")"
-  if [[ "$_vercmp" -lt 0 ]]; then
-    return 0
-  fi
-
-  return 1
-}
-
-
-###
-# ENTRY
-###
-
-perform_install_hysteria_binary() {
-  if [[ -n "$LOCAL_FILE" ]]; then
-    note "Performing local install: $LOCAL_FILE"
-
-    echo -ne "Installing hysteria executable ... "
-
-    if install -Dm755 "$LOCAL_FILE" "$EXECUTABLE_INSTALL_PATH"; then
-      echo "ok"
+    echo -e "\n${CYAN}--- 🔄 检查更新 ---${PLAIN}"
+    log "正在检查新版本..."
+    
+    local latest_script
+    if ! latest_script=$(curl -sL --connect-timeout 5 "$UPDATE_URL"); then
+        echo -e "${RED}❌ 检查更新失败: 无法连接到 GitHub${PLAIN}"
+        return
+    fi
+    
+    local latest_ver=$(echo "$latest_script" | sed -n 's/.*VERSION="\([^"]*\)".*/\1/p' | head -1)
+    
+    if [[ -z "$latest_ver" ]]; then
+         # 尝试从注释中获取 (v7.2 - xxx)
+         latest_ver=$(echo "$latest_script" | sed -n 's/.*v\([0-9.]*\)\s*-.*/\1/p' | head -1)
+    fi
+    
+    if [[ -n "$latest_ver" && "$latest_ver" != "$VERSION" ]]; then
+        echo -e "发现新版本: ${GREEN}v$latest_ver${PLAIN} (当前: v$VERSION)"
+        echo -e "更新内容可能包含: 算法优化、新协议支持或 Bug 修复。"
+        
+        local choice
+        read -p "是否立即更新? [y/N]: " choice
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            log "正在下载更新..."
+            if echo "$latest_script" > "$0"; then
+                chmod +x "$0"
+                log "✅ 更新成功! 正在重启脚本..."
+                exec "$0" "auto" # 重启并进入 auto 模式或菜单
+            else
+                echo -e "${RED}❌ 更新写入失败${PLAIN}"
+            fi
+        fi
     else
-      exit 2
+        echo -e "${GREEN}✅ 当前已是最新版本 (v$VERSION)${PLAIN}"
+        echo -e "无需更新。"
+        read -p "按回车键返回菜单..."
+    fi
+}
+
+# --- 快捷指令安装 ---
+install_shortcut() {
+    local install_path="/usr/bin/bb"
+    # 如果脚本当前不在 /usr/bin/bb，则复制自身
+    if [[ "$0" != "$install_path" ]]; then
+        # 备份原始文件(如果有)并覆盖
+        cp -f "$0" "$install_path"
+        chmod +x "$install_path"
+        log "✅ 已添加快捷指令: 输入 ${GREEN}bb${PLAIN} 即可再次运行此脚本"
+    fi
+}
+
+# --- 系统更新 ---
+update_system() {
+    echo -e "\n${CYAN}--- 系统更新 ---${PLAIN}"
+    local choice="n"
+    if [[ "$AUTO_YES" == true ]]; then
+        log "非交互模式: 跳过系统更新"
+        return
+    fi
+    read -p "是否更新系统软件包? (可能需要较长时间) [y/N]: " choice
+    if [[ "$choice" =~ ^[Yy]$ ]]; then
+        log "正在更新系统..."
+        if command -v apt-get &> /dev/null; then
+            apt-get update -y && apt-get upgrade -y
+        elif command -v yum &> /dev/null; then
+            yum update -y
+        elif command -v dnf &> /dev/null; then
+            dnf update -y
+        else
+            log "⚠️ 未知包管理器，跳过系统更新"
+            return
+        fi
+        log "✅ 系统更新完成"
+    else
+        log "已跳过系统更新"
+    fi
+}
+
+# --- BBR 版本检测 ---
+check_bbr_version() {
+    echo -e "\n${CYAN}--- BBR 版本检测 ---${PLAIN}"
+    local bbr_info=""
+    local bbr_ver=""
+    
+    if modinfo tcp_bbr &>/dev/null; then
+        bbr_info=$(modinfo tcp_bbr)
+        bbr_ver=$(echo "$bbr_info" | grep "^version:" | awk '{print $2}')
     fi
 
-    return
-  fi
-
-  local _tmpfile=$(mktemp)
-
-  if ! download_hysteria "$VERSION" "$_tmpfile"; then
-    rm -f "$_tmpfile"
-    exit 11
-  fi
-
-  echo -ne "Installing hysteria executable ... "
-
-  if install -Dm755 "$_tmpfile" "$EXECUTABLE_INSTALL_PATH"; then
-    echo "ok"
-  else
-    exit 13
-  fi
-
-  rm -f "$_tmpfile"
-}
-
-perform_remove_hysteria_binary() {
-  remove_file "$EXECUTABLE_INSTALL_PATH"
-}
-
-perform_install_hysteria_example_config() {
-  install_content -Dm644 "$(tpl_etc_hysteria_config_yaml)" "$CONFIG_DIR/config.yaml" ""
-}
-
-perform_install_hysteria_systemd() {
-  if [[ "x$FORCE_NO_SYSTEMD" == "x2" ]]; then
-    return
-  fi
-
-  install_content -Dm644 "$(tpl_hysteria_server_service)" "$SYSTEMD_SERVICES_DIR/hysteria-server.service" "1"
-  install_content -Dm644 "$(tpl_hysteria_server_x_service)" "$SYSTEMD_SERVICES_DIR/hysteria-server@.service" "1"
-  if [[ -n "$SECONTEXT_SYSTEMD_UNIT" ]]; then
-    chcon "$SECONTEXT_SYSTEMD_UNIT" "$SYSTEMD_SERVICES_DIR/hysteria-server.service"
-    chcon "$SECONTEXT_SYSTEMD_UNIT" "$SYSTEMD_SERVICES_DIR/hysteria-server@.service"
-  fi
-
-  systemctl daemon-reload
-}
-
-perform_remove_hysteria_systemd() {
-  remove_file "$SYSTEMD_SERVICES_DIR/hysteria-server.service"
-  remove_file "$SYSTEMD_SERVICES_DIR/hysteria-server@.service"
-
-  systemctl daemon-reload
-}
-
-perform_install_hysteria_home_legacy() {
-  if ! is_user_exists "$HYSTERIA_USER"; then
-    echo -ne "Creating user $HYSTERIA_USER ... "
-    useradd -r -d "$HYSTERIA_HOME_DIR" -m "$HYSTERIA_USER"
-    echo "ok"
-  fi
-}
-
-perform_install() {
-  local _is_frash_install
-  local _is_upgrade_from_hysteria1
-  if ! is_hysteria_installed; then
-    _is_frash_install=1
-  elif is_hysteria1_version "$(get_installed_version)"; then
-    _is_upgrade_from_hysteria1=1
-  fi
-
-  local _is_update_required
-
-  if [[ -n "$LOCAL_FILE" ]] || [[ -n "$VERSION" ]] || check_update; then
-    _is_update_required=1
-  fi
-
-  if [[ "x$FORCE" == "x1" ]]; then
-    if [[ -z "$_is_update_required" ]]; then
-      note "Option '--force' detected, re-install even if installed version is the latest."
+    if [[ "$bbr_ver" == "3" ]]; then
+        echo -e "当前内核模块: ${GREEN}BBR v3${PLAIN}"
+    elif [[ -n "$bbr_ver" ]]; then
+        echo -e "当前内核模块: ${GREEN}BBR (标准版) - 版本 $bbr_ver${PLAIN}"
+    else
+        echo -e "当前内核模块: ${YELLOW}未检测到 BBR 模块 (将在配置后生效)${PLAIN}"
     fi
-    _is_update_required=1
-  fi
 
-  if is_hysteria1_version "$VERSION"; then
-    error "This script can only install Hysteria 2."
-    exit 95
-  fi
-
-  if [[ -n "$_is_update_required" ]]; then
-    perform_install_hysteria_binary
-  fi
-
-  # Always install additional files, regardless of $_is_update_required.
-  # This allows changes to be made with environment variables (e.g. change HYSTERIA_USER without --force).
-  perform_install_hysteria_example_config
-  perform_install_hysteria_home_legacy
-  perform_install_hysteria_systemd
-
-  if [[ -z "$_is_update_required" ]]; then
-    echo
-    echo "$(tgreen)Installed version is up-to-date, there is nothing to do.$(treset)"
-    echo
-  elif [[ -n "$_is_frash_install" ]]; then
-    echo
-    echo -e "$(tbold)Congratulation! Hysteria 2 has been successfully installed on your server.$(treset)"
-    echo
-    echo -e "What's next?"
-    echo
-    echo -e "\t+ Take a look at the differences between Hysteria 2 and Hysteria 1 at https://hysteria.network/docs/misc/2-vs-1/"
-    echo -e "\t+ Check out the quick server config guide at $(tblue)https://hysteria.network/docs/getting-started/Server/$(treset)"
-    echo -e "\t+ Edit server config file at $(tred)$CONFIG_DIR/config.yaml$(treset)"
-    echo -e "\t+ Start your hysteria server with $(tred)systemctl start hysteria-server.service$(treset)"
-    echo -e "\t+ Configure hysteria start on system boot with $(tred)systemctl enable hysteria-server.service$(treset)"
-    echo
-  elif [[ -n "$_is_upgrade_from_hysteria1" ]]; then
-    echo -e "Skip automatic service restart due to $(tred)incompatible$(treset) upgrade."
-    echo
-    echo -e "$(tbold)Hysteria has been successfully update to $VERSION from Hysteria 1.$(treset)"
-    echo
-    echo -e "$(tred)Hysteria 2 uses a completely redesigned protocol & config, which is NOT compatible with the version 1.x.x in any way.$(treset)"
-    echo
-    echo -e "\t+ Take a look at the behavior changes in Hysteria 2 at $(tblue)https://hysteria.network/docs/misc/2-vs-1/$(treset)"
-    echo -e "\t+ Check out the quick server configuration guide for Hysteria 2 at $(tblue)https://hysteria.network/docs/getting-started/Server/$(treset)"
-    echo -e "\t+ Migrate server config file to the Hysteria 2 at $(tred)$CONFIG_DIR/config.yaml$(treset)"
-    echo -e "\t+ Start your hysteria server with $(tred)systemctl restart hysteria-server.service$(treset)"
-    echo -e "\t+ Configure hysteria start on system boot with $(tred)systemctl enable hysteria-server.service$(treset)"
-  else
-    restart_running_services
-
-    echo
-    echo -e "$(tbold)Hysteria has been successfully update to $VERSION.$(treset)"
-    echo
-    echo -e "Check out the latest changelog $(tblue)https://github.com/apernet/hysteria/blob/master/CHANGELOG.md$(treset)"
-    echo
-  fi
+    # 检查当前运行状态
+    local current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "none")
+    echo -e "当前运行算法: ${GREEN}$current_cc${PLAIN}"
 }
 
-perform_remove() {
-  perform_remove_hysteria_binary
-  stop_running_services
-  perform_remove_hysteria_systemd
+# --- 🤖 系统检测函数 ---
+detect_system_info() {
+    echo -e "\n${CYAN}--- 🔍 系统检测 ---${PLAIN}"
+    
+    # 1. 硬件检测
+    CPU_CORES=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
+    echo -e "CPU 核心数: ${GREEN}$CPU_CORES${PLAIN}"
+    
+    MEM_TOTAL_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+    MEM_TOTAL_MB=$((MEM_TOTAL_KB / 1024))
+    MEM_TOTAL_GB=$(echo "scale=1; $MEM_TOTAL_MB / 1024" | bc 2>/dev/null || echo "$((MEM_TOTAL_MB / 1024))")
+    echo -e "内存大小: ${GREEN}${MEM_TOTAL_GB}GB${PLAIN} (${MEM_TOTAL_MB}MB)"
+    
+    # 磁盘检测 (支持 NVMe/SATA/VirtIO)
+    DISK_TYPE="HDD"
+    # 检查常见块设备
+    for disk in /sys/block/{sd,vd,nvme}*; do
+        if [[ -f "$disk/queue/rotational" ]]; then
+            if [[ $(cat "$disk/queue/rotational") == "0" ]]; then
+                DISK_TYPE="SSD"
+                break
+            fi
+        fi
+    done
+    echo -e "磁盘类型: ${GREEN}$DISK_TYPE${PLAIN}"
+    
+    # 2. 网络质量检测
+    log "正在测试网络性能 (Ping & Bandwidth)..."
+    
+    # 延迟测试 (多目标取平均)
+    local targets=("8.8.8.8" "1.1.1.1" "223.5.5.5")
+    local total_rtt=0
+    local valid_count=0
+    
+    for target in "${targets[@]}"; do
+        local rtt=$(ping -c 2 -W 1 "$target" 2>/dev/null | tail -1 | awk -F'/' '{print $5}' | cut -d. -f1)
+        if [[ -n "$rtt" ]]; then
+            total_rtt=$((total_rtt + rtt))
+            ((valid_count++))
+        fi
+    done
+    
+    if [[ $valid_count -gt 0 ]]; then
+        NET_LATENCY=$((total_rtt / valid_count))
+    else
+        NET_LATENCY=50  # 默认值
+    fi
+    echo -e "网络延迟 (AVG): ${GREEN}${NET_LATENCY}ms${PLAIN}"
+    
+    # 带宽估算 (尝试从 fast.com 或 cloudflare 测速，超时回退到网卡协商速率)
+    # 这里使用简单的 curl 下载测速，只测 3 秒
+    local test_url="https://speed.cloudflare.com/__down?bytes=10000000" # 10MB
+    local speed_test=$(curl -L -s -w "%{speed_download}" -o /dev/null --max-time 3 "$test_url" || echo 0)
+    # curl 返回单位是 byte/s，转换为 Mbps
+    # byte/s * 8 / 1000000
+    local measured_bw_mbps=$(echo "scale=0; $speed_test * 8 / 1000000" | bc 2>/dev/null || echo 0)
+    
+    # 获取网卡协商速率作为上限
+    local link_speed=1000
+    local primary_nic=$(ip route | grep default | awk '{print $5}' | head -1)
+    if [[ -n "$primary_nic" && -f "/sys/class/net/$primary_nic/speed" ]]; then
+        local sys_speed=$(cat "/sys/class/net/$primary_nic/speed" 2>/dev/null)
+        # speed 文件可能返回 -1 或空
+        if [[ -n "$sys_speed" && "$sys_speed" -gt 0 ]]; then
+            link_speed=$sys_speed
+        fi
+    fi
+    
+    # 如果实测速度有效且合理，优先使用实测值(更真实反映线路质量)，否则使用网卡协商速率
+    if [[ "$measured_bw_mbps" -gt 1 ]]; then
+         NIC_SPEED=$measured_bw_mbps
+         echo -e "实测带宽: ${GREEN}${NIC_SPEED}Mbps${PLAIN}"
+    else
+         NIC_SPEED=$link_speed
+         echo -e "协商带宽: ${GREEN}${NIC_SPEED}Mbps${PLAIN} (测试失败，使用网卡速率)"
+    fi
 
-  echo
-  echo -e "$(tbold)Congratulation! Hysteria has been successfully removed from your server.$(treset)"
-  echo
-  echo -e "You still need to remove configuration files and ACME certificates manually with the following commands:"
-  echo
-  echo -e "\t$(tred)rm -rf "$CONFIG_DIR"$(treset)"
-  if [[ "x$HYSTERIA_USER" != "xroot" ]]; then
-    echo -e "\t$(tred)userdel -r "$HYSTERIA_USER"$(treset)"
-  fi
-  if [[ "x$FORCE_NO_SYSTEMD" != "x2" ]]; then
-    echo
-    echo -e "You still might need to disable all related systemd services with the following commands:"
-    echo
-    echo -e "\t$(tred)rm -f /etc/systemd/system/multi-user.target.wants/hysteria-server.service$(treset)"
-    echo -e "\t$(tred)rm -f /etc/systemd/system/multi-user.target.wants/hysteria-server@*.service$(treset)"
-    echo -e "\t$(tred)systemctl daemon-reload$(treset)"
-  fi
-  echo
+    # 3. 评级
+    # 判断服务器级别
+    if [[ $CPU_CORES -le 2 && $MEM_TOTAL_MB -le 2048 ]]; then
+        SERVER_TIER="low"
+    elif [[ $CPU_CORES -ge 4 && $MEM_TOTAL_MB -ge 8192 ]]; then
+        SERVER_TIER="high"
+    else
+        SERVER_TIER="medium"
+    fi
 }
 
-perform_check_update() {
-  if check_update; then
-    echo
-    echo -e "$(tbold)Update available: $VERSION$(treset)"
-    echo
-    echo -e "$(tgreen)You can download and install the latest version by execute this script without any arguments.$(treset)"
-    echo
-  else
-    echo
-    echo "$(tgreen)Installed version is up-to-date.$(treset)"
-    echo
-  fi
+# 计算 BDP (Bandwidth-Delay Product)
+calculate_bdp() {
+    # BDP = 带宽(bytes/s) * RTT(s)
+    # 例如: 1Gbps * 100ms = 125MB/s * 0.1s = 12.5MB
+    local bandwidth_mbps=$1
+    local rtt_ms=$2
+    local bdp_bytes=$(( (bandwidth_mbps * 1000000 / 8) * rtt_ms / 1000 ))
+    echo $bdp_bytes
 }
 
+# --- 🤖 智能自动调优 ---
+apply_auto_optimization() {
+    log "🤖 正在执行智能自动调优..."
+    
+    # 检测系统信息
+    detect_system_info
+    
+    echo -e "\n${CYAN}--- 📊 算法参数计算 ---${PLAIN}"
+    
+    # 1. 计算 BDP (Bandwidth-Delay Product)
+    # BDP = 带宽(Mbps) * 延迟(ms) * 1000 / 8 (转换为 bytes)
+    # 示例: 100Mbps * 200ms = 2.5MB
+    local bdp_bytes=$(( NIC_SPEED * 1000000 / 8 * NET_LATENCY / 1000 ))
+    echo -e "带宽延迟积 (BDP): ${GREEN}$((bdp_bytes / 1024))KB${PLAIN}"
+    
+    # 2. 确定 TCP 窗口大小 (BDP * 安全系数 1.33)
+    local target_window=$(( bdp_bytes * 133 / 100 ))
+    # 最小限制 4MB (避免太小), 最大限制 128MB (内核限制)
+    [[ $target_window -lt 4194304 ]] && target_window=4194304
+    [[ $target_window -gt 134217728 ]] && target_window=134217728
+    
+    echo -e "目标 TCP 窗口: ${GREEN}$((target_window / 1024 / 1024))MB${PLAIN}"
+    
+    # 3. 内存安全限制 (避免 OOM)
+    # 允许最大 TCP 内存占用 = 系统总内存的 25%
+    local max_tcp_ram=$(( MEM_TOTAL_KB * 1024 / 4 )) 
+    # 如果计算出的窗口会导致过大内存压力，进行缩减
+    # 假设有 100 个并发连接跑满窗口 (保守估计)
+    local safe_limit=$(( max_tcp_ram / 100 ))
+    if [[ $target_window -gt $safe_limit ]]; then
+        echo -e "${YELLOW}警告: 目标窗口超过内存安全限制，已自动调整${PLAIN}"
+        target_window=$safe_limit
+    fi
+    
+    # 4. 设定参数
+    local rmem_max=$target_window
+    local wmem_max=$target_window
+    local tcp_rmem_max=$target_window
+    local tcp_wmem_max=$target_window
+    
+    # 其他基础参数基于层级微调
+    local somaxconn netdev_budget file_max
+    case "$SERVER_TIER" in
+        low)
+            somaxconn=4096; netdev_budget=300; file_max=262144
+            ;;
+        high)
+            somaxconn=65535; netdev_budget=600; file_max=6815744
+            ;;
+        *)
+            somaxconn=32768; netdev_budget=500; file_max=6815744
+            ;;
+    esac
+    
+    # 计算 tcp_mem (页单位)
+    local mem_pages=$((MEM_TOTAL_KB * 1024 / 4096))
+    local tcp_mem_min=$((mem_pages / 16))
+    local tcp_mem_pressure=$((mem_pages / 8))
+    local tcp_mem_max=$((mem_pages / 4))
+    
+    echo -e "配置结果 -> rmem_max: $((rmem_max/1024/1024))MB | somaxconn: $somaxconn"
+    
+    # 备份环境准备
+    mkdir -p "$ORIGINAL_BACKUP_DIR" "$HISTORY_BACKUP_DIR"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    
+    local files=("$SYSCTL_CONF" "$LIMITS_CONF" "$SYSTEMD_CONF")
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            local base_name=$(basename "$file")
+            if [[ ! -f "$ORIGINAL_BACKUP_DIR/$base_name.orig" ]]; then
+                cp "$file" "$ORIGINAL_BACKUP_DIR/$base_name.orig"
+                log "💾 已创建原始备份: $base_name.orig"
+            fi
+            cp "$file" "$HISTORY_BACKUP_DIR/$base_name.$timestamp.bak"
+        fi
+    done
+    
+    find "$HISTORY_BACKUP_DIR" -name "*.bak" -type f 2>/dev/null | sort -r | tail -n +$((MAX_HISTORY_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
+    
+    # 加载模块
+    if ! lsmod | grep -q tcp_bbr; then
+        modprobe tcp_bbr &>/dev/null || true
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+    fi
+    load_qdisc_module "fq"
+    modprobe nf_conntrack &>/dev/null || true
+    
+    apply_limits_optimization
+    
+    echo -e "\n${CYAN}--- 📝 应用配置 ---${PLAIN}"
+    cat > "$SYSCTL_CONF" << EOF
+# ==========================================
+# 🤖 Smart Auto-Tuned Network Optimization
+# Generated by bbr.sh v7.1 at $(date)
+# Original backup at: $ORIGINAL_BACKUP_DIR
+# ==========================================
+# 诊断数据:
+#   CPU: ${CPU_CORES}c | 内存: ${MEM_TOTAL_GB}GB | 磁盘: $DISK_TYPE
+#   带宽(est): ${NIC_SPEED}Mbps | 延迟(avg): ${NET_LATENCY}ms
+#   BDP: $((bdp_bytes)) bytes | Target Window: $target_window bytes
+# ==========================================
+
+# --- 核心网络参数 (BBR + fq) ---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# --- 文件描述符 ---
+fs.file-max = $file_max
+
+# --- 动态缓冲区 (基于 BDP) ---
+net.core.rmem_max = $rmem_max
+net.core.wmem_max = $wmem_max
+net.core.rmem_default = $((rmem_max / 2))
+net.core.wmem_default = $((wmem_max / 2))
+# tcp_rmem: min default max
+net.ipv4.tcp_rmem = 4096 $((tcp_rmem_max / 2)) $tcp_rmem_max
+net.ipv4.tcp_wmem = 4096 $((tcp_wmem_max / 2)) $tcp_wmem_max
+net.ipv4.tcp_mem = $tcp_mem_min $tcp_mem_pressure $tcp_mem_max
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+# --- 网络队列 ---
+net.core.somaxconn = $somaxconn
+net.core.netdev_max_backlog = $((somaxconn * 2))
+net.core.netdev_budget = $netdev_budget
+net.core.netdev_budget_usecs = 8000
+
+# --- TCP 行为优化 ---
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+
+# --- 连接优化 ---
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 10
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_syn_backlog = $((somaxconn / 2))
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 3
+
+# --- UDP 连接追踪 ---
+net.netfilter.nf_conntrack_udp_timeout = 60
+net.netfilter.nf_conntrack_udp_timeout_stream = 180
+
+# --- 转发开启 ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+EOF
+
+    if sysctl --system &>/dev/null; then
+        echo -e "${GREEN}✅ 智能自动调优(v7.1) 已应用!${PLAIN}"
+    else
+        echo -e "${RED}⚠️  sysctl 应用失败${PLAIN}"
+    fi
+}
+
+# --- 模块管理 ---
+load_qdisc_module() {
+    local qdisc=$1
+    local module="sch_$qdisc"
+
+    # fq 和 fq_codel 通常是内置的，但也尝试加载以防万一
+    log "正在检查并加载模块: $module"
+    
+    if modprobe "$module" &>/dev/null; then
+        log "✅ 模块 $module 加载成功"
+    else
+        # 并不是所有内核都编译了所有模块，失败不一定是错误
+        log "⚠️ 模块 $module 加载尝试结束 (可能已内置或不支持)"
+    fi
+
+    # 持久化加载配置
+    mkdir -p "$(dirname "$MODULES_CONF")"
+    if [[ "$qdisc" != "fq" && "$qdisc" != "fq_codel" ]]; then
+        if ! grep -q "^$module" "$MODULES_CONF" 2>/dev/null; then
+            echo "$module" >> "$MODULES_CONF"
+            log "已添加 $module 到自动加载列表"
+        fi
+    fi
+}
+
+# --- 极限优化 (文件描述符等) ---
+apply_limits_optimization() {
+    log "正在配置系统资源限制 (Limit Load)..."
+
+    # 1. 用户级限制 (/etc/security/limits.conf)
+    local limits_content="* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576"
+
+    if ! grep -q "soft nofile 1048576" "$LIMITS_CONF"; then
+        echo -e "\n$limits_content" >> "$LIMITS_CONF"
+        log "✅ 已更新 $LIMITS_CONF"
+    else
+        log "ℹ️ $LIMITS_CONF 已包含优化限制"
+    fi
+
+    # 2. Systemd 全局限制 (/etc/systemd/system.conf)
+    if [[ -f "$SYSTEMD_CONF" ]]; then
+        if ! grep -q "^DefaultLimitNOFILE=1048576" "$SYSTEMD_CONF"; then
+            sed -i 's/^#DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576/' "$SYSTEMD_CONF"
+            if ! grep -q "^DefaultLimitNOFILE=1048576" "$SYSTEMD_CONF"; then
+                echo "DefaultLimitNOFILE=1048576" >> "$SYSTEMD_CONF"
+            fi
+            log "✅ 已更新 $SYSTEMD_CONF"
+            systemctl daemon-reexec || true
+        else
+            log "ℹ️ $SYSTEMD_CONF 已包含优化限制"
+        fi
+    fi
+
+    # 3. 检查 PAM 限制 (提示性质)
+    if [[ -f /etc/pam.d/common-session ]]; then
+        if ! grep -q "pam_limits.so" /etc/pam.d/common-session; then
+            log "⚠️ 警告: 未在 /etc/pam.d/common-session 中检测到 pam_limits.so，限制可能无法在 SSH 登录时立即生效。"
+        fi
+    fi
+}
+
+# --- Sysctl 配置 ---
+apply_optimization() {
+    local qdisc=$1
+    log "正在应用网络优化配置 (QDisc: $qdisc)..."
+
+    # 1. 分层备份环境准备
+    mkdir -p "$ORIGINAL_BACKUP_DIR" "$HISTORY_BACKUP_DIR"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    
+    local files=("$SYSCTL_CONF" "$LIMITS_CONF" "$SYSTEMD_CONF")
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            local base_name=$(basename "$file")
+            # 原始备份 (仅在不存在时创建)
+            if [[ ! -f "$ORIGINAL_BACKUP_DIR/$base_name.orig" ]]; then
+                cp "$file" "$ORIGINAL_BACKUP_DIR/$base_name.orig"
+                log "💾 已创建原始备份: $base_name.orig"
+            fi
+            # 历史备份 (每次运行都创建)
+            cp "$file" "$HISTORY_BACKUP_DIR/$base_name.$timestamp.bak"
+        fi
+    done
+
+    # 清理旧的历史备份，只保留最近 N 个
+    find "$HISTORY_BACKUP_DIR" -name "*.bak" -type f 2>/dev/null | sort -r | tail -n +$((MAX_HISTORY_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
+
+    # 2. 加载模块
+    # 确保 BBR 模块加载
+    if ! lsmod | grep -q tcp_bbr; then
+        modprobe tcp_bbr &>/dev/null || true
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+    fi
+    load_qdisc_module "$qdisc"
+
+    # 3. 应用 Limits 优化
+    apply_limits_optimization
+    cat > "$SYSCTL_CONF" << EOF
+# ==========================================
+# BBR Network Optimization
+# Generated by bbr.sh at $(date)
+# Original backup at: $ORIGINAL_BACKUP_DIR
+# ==========================================
+
+# --- 核心网络参数 ---
+net.core.default_qdisc = $qdisc
+net.ipv4.tcp_congestion_control = bbr
+
+# --- TCP 缓冲区优化 (基于通常建议值) ---
+fs.file-max = 6815744
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+# --- TCP 行为优化 ---
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_ecn = 0
+net.ipv4.tcp_frto = 0
+net.ipv4.tcp_mtu_probing = 0
+net.ipv4.tcp_sack = 1
+# net.ipv4.tcp_fack = 1  # 已在 Linux 4.15+ 移除
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_moderate_rcvbuf = 1
+
+# --- 连接保持与安全性 ---
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_synack_retries = 2
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 3
+
+# --- 转发开启 ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+EOF
+
+    # 4. 应用 (使用 --system 加载所有 /etc/sysctl.d/ 配置)
+    if sysctl --system &>/dev/null; then
+        echo -e "${GREEN}✅ 优化配置已应用!${PLAIN}"
+    else
+        echo -e "${RED}⚠️  sysctl 应用失败，请检查配置文件${PLAIN}"
+    fi
+}
+
+# --- Hysteria2 进程优先级配置 (官方推荐) ---
+configure_hysteria2_priority() {
+    local service_name="hysteria-server"
+    local priority_conf="/etc/systemd/system/${service_name}.service.d/priority.conf"
+    
+    # 检查 Hysteria2 服务是否存在
+    if ! systemctl list-unit-files | grep -q "$service_name"; then
+        log "⚠️ 未检测到 Hysteria2 服务 ($service_name)，跳过优先级配置"
+        return
+    fi
+    
+    echo -e "\n${CYAN}--- Hysteria2 进程优先级 ---${PLAIN}"
+    
+    if [[ "$AUTO_YES" != true ]]; then
+        read -p "是否设置 Hysteria2 进程优先级 (推荐、降低延迟抖动)? [y/N]: " choice
+        [[ ! "$choice" =~ ^[Yy]$ ]] && return
+    fi
+    
+    mkdir -p "$(dirname "$priority_conf")"
+    cat > "$priority_conf" << 'EOF'
+# Hysteria2 进程优先级配置 (官方推荐)
+# 来源: https://v2.hysteria.network/zh/docs/advanced/Performance/
+[Service]
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=99
+EOF
+    
+    systemctl daemon-reload
+    if systemctl restart "$service_name" 2>/dev/null; then
+        log "✅ 已设置 Hysteria2 实时调度优先级 (rr:99)"
+    else
+        log "⚠️ Hysteria2 服务重启失败，请手动重启: systemctl restart $service_name"
+    fi
+}
+
+# --- Hysteria2 QUIC 窗口配置提示 ---
+show_hysteria2_quic_tips() {
+    echo -e "\n${CYAN}--- 💡 Hysteria2 QUIC 窗口优化提示 ---${PLAIN}"
+    echo -e "建议在 Hysteria2 配置文件中添加以下参数 (官方推荐):"
+    echo -e "${GREEN}"
+    cat << 'EOF'
+quic:
+  initStreamReceiveWindow: 26843545
+  maxStreamReceiveWindow: 26843545
+  initConnReceiveWindow: 67108864
+  maxConnReceiveWindow: 67108864
+EOF
+    echo -e "${PLAIN}"
+    echo -e "流/连接窗口比例应保持约 2:5，避免单流堵塞整个连接。"
+    echo -e "更多详情: ${CYAN}https://v2.hysteria.network/zh/docs/advanced/Performance/${PLAIN}"
+}
+
+# --- Hysteria2 专用优化 (UDP/QUIC) ---
+apply_hysteria2_optimization() {
+    log "正在应用 Hysteria2 专用优化 (UDP/QUIC)..."
+
+    # 备份环境准备
+    mkdir -p "$ORIGINAL_BACKUP_DIR" "$HISTORY_BACKUP_DIR"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    
+    local files=("$SYSCTL_CONF" "$LIMITS_CONF" "$SYSTEMD_CONF")
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            local base_name=$(basename "$file")
+            if [[ ! -f "$ORIGINAL_BACKUP_DIR/$base_name.orig" ]]; then
+                cp "$file" "$ORIGINAL_BACKUP_DIR/$base_name.orig"
+                log "💾 已创建原始备份: $base_name.orig"
+            fi
+            cp "$file" "$HISTORY_BACKUP_DIR/$base_name.$timestamp.bak"
+        fi
+    done
+
+    find "$HISTORY_BACKUP_DIR" -name "*.bak" -type f 2>/dev/null | sort -r | tail -n +$((MAX_HISTORY_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
+
+    apply_limits_optimization
+    cat > "$SYSCTL_CONF" << EOF
+# ==========================================
+# Hysteria2 (UDP/QUIC) Optimization
+# Generated by bbr.sh v7.2 at $(date)
+# Original backup at: $ORIGINAL_BACKUP_DIR
+# 参考: https://v2.hysteria.network/zh/docs/advanced/Performance/
+# ==========================================
+
+# --- 文件描述符限制 ---
+fs.file-max = 6815744
+
+# --- UDP 缓冲区优化 (QUIC 核心) ---
+# 官方推荐 16MB，但高带宽场景可用 64MB
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.rmem_default = 26214400
+net.core.wmem_default = 26214400
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+# --- UDP 连接追踪 ---
+net.netfilter.nf_conntrack_udp_timeout = 60
+net.netfilter.nf_conntrack_udp_timeout_stream = 180
+
+# --- 禁用反向路径过滤 (UDP 重要) ---
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+
+# --- 转发开启 ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+
+# --- 网络队列优化 ---
+net.core.netdev_max_backlog = 65536
+net.core.somaxconn = 65535
+
+# --- 可选: BBR 对 TCP 回退连接有帮助 ---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+EOF
+
+    # 加载 nf_conntrack 模块
+    modprobe nf_conntrack &>/dev/null || true
+
+    if sysctl --system &>/dev/null; then
+        echo -e "${GREEN}✅ Hysteria2 系统参数已优化!${PLAIN}"
+    else
+        echo -e "${RED}⚠️  sysctl 应用失败${PLAIN}"
+    fi
+    
+    # 配置进程优先级 (官方推荐)
+    configure_hysteria2_priority
+    
+    # 显示 QUIC 窗口配置提示
+    show_hysteria2_quic_tips
+}
+
+# --- VLESS-WS 专用优化 (TCP/WebSocket) ---
+apply_vless_ws_optimization() {
+    log "正在应用 VLESS-WS 专用优化 (TCP/WebSocket)..."
+
+    mkdir -p "$ORIGINAL_BACKUP_DIR" "$HISTORY_BACKUP_DIR"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    
+    local files=("$SYSCTL_CONF" "$LIMITS_CONF" "$SYSTEMD_CONF")
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            local base_name=$(basename "$file")
+            if [[ ! -f "$ORIGINAL_BACKUP_DIR/$base_name.orig" ]]; then
+                cp "$file" "$ORIGINAL_BACKUP_DIR/$base_name.orig"
+                log "💾 已创建原始备份: $base_name.orig"
+            fi
+            cp "$file" "$HISTORY_BACKUP_DIR/$base_name.$timestamp.bak"
+        fi
+    done
+
+    find "$HISTORY_BACKUP_DIR" -name "*.bak" -type f 2>/dev/null | sort -r | tail -n +$((MAX_HISTORY_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
+
+    if ! lsmod | grep -q tcp_bbr; then
+        modprobe tcp_bbr &>/dev/null || true
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+    fi
+    load_qdisc_module "fq"
+
+    apply_limits_optimization
+    cat > "$SYSCTL_CONF" << EOF
+# ==========================================
+# VLESS-WS (TCP/WebSocket) Optimization
+# Generated by bbr.sh at $(date)
+# Original backup at: $ORIGINAL_BACKUP_DIR
+# ==========================================
+
+# --- 核心网络参数 (BBR + fq) ---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# --- 文件描述符 ---
+fs.file-max = 6815744
+
+# --- TCP 缓冲区优化 ---
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+
+# --- TCP 行为优化 ---
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_moderate_rcvbuf = 1
+
+# --- WebSocket 长连接优化 ---
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 10
+
+# --- 连接优化 ---
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 3
+
+# --- 转发开启 ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+EOF
+
+    if sysctl --system &>/dev/null; then
+        echo -e "${GREEN}✅ VLESS-WS 专用优化已应用!${PLAIN}"
+    else
+        echo -e "${RED}⚠️  sysctl 应用失败${PLAIN}"
+    fi
+}
+
+# --- VLESS-WS (Cloudflare CDN) 专用优化 (TCP/WebSocket) ---
+apply_vless_ws_cdn_optimization() {
+    log "正在应用 VLESS-WS (Cloudflare CDN) 专用优化 (TCP/WebSocket)..."
+
+    mkdir -p "$ORIGINAL_BACKUP_DIR" "$HISTORY_BACKUP_DIR"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    
+    local files=("$SYSCTL_CONF" "$LIMITS_CONF" "$SYSTEMD_CONF")
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            local base_name=$(basename "$file")
+            if [[ ! -f "$ORIGINAL_BACKUP_DIR/$base_name.orig" ]]; then
+                cp "$file" "$ORIGINAL_BACKUP_DIR/$base_name.orig"
+                log "💾 已创建原始备份: $base_name.orig"
+            fi
+            cp "$file" "$HISTORY_BACKUP_DIR/$base_name.$timestamp.bak"
+        fi
+    done
+
+    find "$HISTORY_BACKUP_DIR" -name "*.bak" -type f 2>/dev/null | sort -r | tail -n +$((MAX_HISTORY_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
+
+    if ! lsmod | grep -q tcp_bbr; then
+        modprobe tcp_bbr &>/dev/null || true
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+    fi
+    load_qdisc_module "fq"
+
+    apply_limits_optimization
+    cat > "$SYSCTL_CONF" << EOF
+# ==========================================
+# VLESS-WS (Cloudflare CDN) Optimization
+# Generated by bbr.sh at $(date)
+# Original backup at: $ORIGINAL_BACKUP_DIR
+# ==========================================
+
+# --- 核心网络参数 (BBR + fq) ---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# --- 文件描述符 ---
+fs.file-max = 6815744
+
+# --- TCP 缓冲区优化 ---
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+
+# --- TCP 行为优化 ---
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_moderate_rcvbuf = 1
+
+# --- WebSocket 长连接优化 (CDN 场景下 Keepalive 设短) ---
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 5
+
+# --- 连接优化 ---
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 3
+
+# --- 转发开启 ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+EOF
+
+    if sysctl --system &>/dev/null; then
+        echo -e "${GREEN}✅ VLESS-WS (Cloudflare CDN) 专用优化已应用!${PLAIN}"
+    else
+        echo -e "${RED}⚠️  sysctl 应用失败${PLAIN}"
+    fi
+}
+
+# --- VLESS-XTLS/Reality 专用优化 (TCP/TLS + UDP透传) ---
+apply_vless_xtls_optimization() {
+    log "正在应用 VLESS-XTLS/Reality 专用优化 (TCP/TLS + UDP透传)..."
+
+    mkdir -p "$ORIGINAL_BACKUP_DIR" "$HISTORY_BACKUP_DIR"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    
+    local files=("$SYSCTL_CONF" "$LIMITS_CONF" "$SYSTEMD_CONF")
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            local base_name=$(basename "$file")
+            if [[ ! -f "$ORIGINAL_BACKUP_DIR/$base_name.orig" ]]; then
+                cp "$file" "$ORIGINAL_BACKUP_DIR/$base_name.orig"
+                log "💾 已创建原始备份: $base_name.orig"
+            fi
+            cp "$file" "$HISTORY_BACKUP_DIR/$base_name.$timestamp.bak"
+        fi
+    done
+
+    find "$HISTORY_BACKUP_DIR" -name "*.bak" -type f 2>/dev/null | sort -r | tail -n +$((MAX_HISTORY_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
+
+    if ! lsmod | grep -q tcp_bbr; then
+        modprobe tcp_bbr &>/dev/null || true
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+    fi
+    load_qdisc_module "fq"
+    modprobe nf_conntrack &>/dev/null || true
+
+    apply_limits_optimization
+    cat > "$SYSCTL_CONF" << EOF
+# ==========================================
+# VLESS-XTLS/Reality (TCP/TLS + UDP) Optimization
+# Generated by bbr.sh at $(date)
+# Original backup at: $ORIGINAL_BACKUP_DIR
+# ==========================================
+
+# --- 核心网络参数 (BBR + fq) ---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# --- 文件描述符 ---
+fs.file-max = 6815744
+
+# --- TCP 缓冲区优化 (XTLS 零拷贝加速) ---
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+
+# --- UDP 缓冲区优化 (UDP 透传支持) ---
+net.core.rmem_default = 26214400
+net.core.wmem_default = 26214400
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+# --- TCP 行为优化 (XTLS 增强) ---
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+
+# --- TLS/Reality 连接优化 ---
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+
+# --- 连接优化 (更激进的回收) ---
+net.ipv4.tcp_fin_timeout = 5
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_tw_buckets = 65535
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 3
+
+# --- UDP 连接追踪 (UDP 透传) ---
+net.netfilter.nf_conntrack_udp_timeout = 60
+net.netfilter.nf_conntrack_udp_timeout_stream = 180
+
+# --- 网络队列优化 ---
+net.core.netdev_max_backlog = 65536
+net.core.somaxconn = 65535
+
+# --- 转发开启 ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+EOF
+
+    if sysctl --system &>/dev/null; then
+        echo -e "${GREEN}✅ VLESS-XTLS/Reality 专用优化已应用!${PLAIN}"
+    else
+        echo -e "${RED}⚠️  sysctl 应用失败${PLAIN}"
+    fi
+}
+
+# --- 混合模式 (Hysteria2 + VLESS) ---
+apply_mixed_optimization() {
+    log "正在应用混合模式优化 (Hysteria2 + VLESS)..."
+
+    mkdir -p "$ORIGINAL_BACKUP_DIR" "$HISTORY_BACKUP_DIR"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    
+    local files=("$SYSCTL_CONF" "$LIMITS_CONF" "$SYSTEMD_CONF")
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            local base_name=$(basename "$file")
+            if [[ ! -f "$ORIGINAL_BACKUP_DIR/$base_name.orig" ]]; then
+                cp "$file" "$ORIGINAL_BACKUP_DIR/$base_name.orig"
+                log "💾 已创建原始备份: $base_name.orig"
+            fi
+            cp "$file" "$HISTORY_BACKUP_DIR/$base_name.$timestamp.bak"
+        fi
+    done
+
+    find "$HISTORY_BACKUP_DIR" -name "*.bak" -type f 2>/dev/null | sort -r | tail -n +$((MAX_HISTORY_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
+
+    if ! lsmod | grep -q tcp_bbr; then
+        modprobe tcp_bbr &>/dev/null || true
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+    fi
+    load_qdisc_module "fq"
+    modprobe nf_conntrack &>/dev/null || true
+
+    apply_limits_optimization
+    cat > "$SYSCTL_CONF" << EOF
+# ==========================================
+# Mixed Mode (Hysteria2 + VLESS) Optimization
+# Generated by bbr.sh at $(date)
+# Original backup at: $ORIGINAL_BACKUP_DIR
+# ==========================================
+
+# --- 核心网络参数 (BBR 对 TCP 和 QUIC 回退都有用) ---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# --- 文件描述符 ---
+fs.file-max = 6815744
+
+# --- UDP 缓冲区优化 (Hysteria2/QUIC) ---
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.rmem_default = 26214400
+net.core.wmem_default = 26214400
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+# --- TCP 缓冲区优化 (VLESS) ---
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+
+# --- TCP 行为优化 ---
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_moderate_rcvbuf = 1
+
+# --- WebSocket 长连接优化 ---
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 10
+
+# --- 连接优化 ---
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 3
+
+# --- UDP 连接追踪 (Hysteria2) ---
+net.netfilter.nf_conntrack_udp_timeout = 60
+net.netfilter.nf_conntrack_udp_timeout_stream = 180
+
+# --- 禁用反向路径过滤 ---
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+
+# --- 网络队列优化 ---
+net.core.netdev_max_backlog = 65536
+net.core.somaxconn = 65535
+
+# --- 转发开启 ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+EOF
+
+    if sysctl --system &>/dev/null; then
+        echo -e "${GREEN}✅ 混合模式优化已应用!${PLAIN}"
+    else
+        echo -e "${RED}⚠️  sysctl 应用失败${PLAIN}"
+    fi
+}
+
+# --- 恢复原始配置 ---
+restore_original_config() {
+    echo -e "\n${YELLOW}警告: 即将将系统网络与限制配置恢复为原始备份状态。${PLAIN}"
+    if [[ "$AUTO_YES" != true ]]; then
+        read -p "确定要继续吗? [y/N]: " choice
+        [[ ! "$choice" =~ ^[Yy]$ ]] && return
+    fi
+
+    local files=("$SYSCTL_CONF" "$LIMITS_CONF" "$SYSTEMD_CONF")
+    local restored=0
+
+    for file in "${files[@]}"; do
+        local base_name=$(basename "$file")
+        local orig_file="$ORIGINAL_BACKUP_DIR/$base_name.orig"
+        
+        if [[ -f "$orig_file" ]]; then
+            log "正在恢复: $base_name"
+            cp "$orig_file" "$file"
+            ((restored++))
+        else
+            log "⚠️ 未找到 $base_name 的原始备份，跳过恢复。"
+        fi
+    done
+
+    if [[ $restored -gt 0 ]]; then
+        log "正在应用恢复后的配置..."
+        sysctl --system &>/dev/null || true
+        systemctl daemon-reexec || true
+        echo -e "${GREEN}✅ 系统配置已部分/全部恢复原始状态!${PLAIN}"
+        echo -e "${YELLOW}提示: 为了确保完全生效，建议重启系统或重新登录 SSH。${PLAIN}"
+    else
+        echo -e "${RED}❌ 恢复失败: 未检测到任何可用的原始备份文件。${PLAIN}"
+    fi
+}
+
+# --- 验证 ---
+verify_status() {
+    local mode="$1"
+    echo -e "\n${CYAN}--- 状态验证 ---${PLAIN}"
+    local cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+    local qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+    local ul=$(ulimit -n)
+    local rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "unknown")
+    
+    echo -e "拥塞控制: ${GREEN}$cc${PLAIN}"
+    echo -e "队列调度: ${GREEN}$qd${PLAIN}"
+    echo -e "文件句柄: ${GREEN}$ul${PLAIN}"
+    echo -e "rmem_max: ${GREEN}$rmem${PLAIN}"
+    
+    case "$mode" in
+        hysteria2)
+            if [[ "$rmem" -ge 67108864 && "$ul" -ge 1048576 ]]; then
+                echo -e "${GREEN}✨ Hysteria2 优化成功生效!${PLAIN}"
+            else
+                echo -e "${YELLOW}⚠️  配置似乎未完全生效，建议重启系统。${PLAIN}"
+            fi
+            ;;
+        vless-ws)
+            if [[ "$cc" == "bbr" && "$qd" == "fq" && "$ul" -ge 1048576 ]]; then
+                echo -e "${GREEN}✨ VLESS-WS 优化成功生效!${PLAIN}"
+            else
+                echo -e "${YELLOW}⚠️  配置似乎未完全生效，建议重启系统。${PLAIN}"
+            fi
+            ;;
+        ws-cdn)
+            local ka=$(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null)
+            if [[ "$ka" == "60" && "$ul" -ge 1048576 ]]; then
+                echo -e "${GREEN}✨ VLESS-WS (CDN) 优化成功生效!${PLAIN}"
+            else
+                echo -e "${YELLOW}⚠️  配置未完全生效 (Keepalive: $ka/60)，建议重启。${PLAIN}"
+            fi
+            ;;
+        vless-xtls)
+            if [[ "$cc" == "bbr" && "$qd" == "fq" && "$ul" -ge 1048576 ]]; then
+                echo -e "${GREEN}✨ VLESS-XTLS/Reality 优化成功生效!${PLAIN}"
+                echo -e "${CYAN}提示: 已启用 UDP 透传支持，适用于游戏/VoIP 等应用${PLAIN}"
+            else
+                echo -e "${YELLOW}⚠️  配置似乎未完全生效，建议重启系统。${PLAIN}"
+            fi
+            ;;
+        mixed)
+            if [[ "$cc" == "bbr" && "$rmem" -ge 67108864 && "$ul" -ge 1048576 ]]; then
+                echo -e "${GREEN}✨ 混合模式优化成功生效!${PLAIN}"
+            else
+                echo -e "${YELLOW}⚠️  配置似乎未完全生效，建议重启系统。${PLAIN}"
+            fi
+            ;;
+        *)
+            # 通用模式
+            if [[ "$cc" == "bbr" && "$qd" == "$mode" && "$ul" -ge 1048576 ]]; then
+                echo -e "${GREEN}✨ 优化成功生效!${PLAIN}"
+            else
+                echo -e "${YELLOW}⚠️  配置似乎未完全生效，建议重启系统或重新登录 SSH。${PLAIN}"
+                echo -e "${YELLOW}提示: 如果选择了 cake/fq_pie 但验证显示为 fq/pfifo_fast，说明当前内核不支持该算法。${PLAIN}"
+            fi
+            ;;
+    esac
+}
+
+# 智能模式验证
+verify_auto_status() {
+    echo -e "\n${CYAN}--- 智能调优验证 ---${PLAIN}"
+    local cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+    local qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+    local ul=$(ulimit -n)
+    local rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "0")
+    local wmem=$(sysctl -n net.core.wmem_max 2>/dev/null || echo "0")
+    
+    echo -e "拥塞控制: ${GREEN}$cc${PLAIN}"
+    echo -e "队列调度: ${GREEN}$qd${PLAIN}"
+    echo -e "文件句柄: ${GREEN}$ul${PLAIN}"
+    echo -e "rmem_max: ${GREEN}$((rmem / 1048576))MB${PLAIN}"
+    echo -e "wmem_max: ${GREEN}$((wmem / 1048576))MB${PLAIN}"
+    
+    if [[ "$cc" == "bbr" && "$qd" == "fq" ]]; then
+        echo -e "${GREEN}✨ 智能自动调优成功生效!${PLAIN}"
+        echo -e "${CYAN}提示: 参数已根据您的硬件和网络状况智能计算${PLAIN}"
+    else
+        echo -e "${YELLOW}⚠️  配置似乎未完全生效，建议重启系统。${PLAIN}"
+    fi
+}
+
+# --- 菜单逻辑 ---
+show_menu() {
+    clear
+    echo "==========================================="
+    echo "      BBR 网络优化脚本 (v7.2)"
+    echo "==========================================="
+    check_bbr_version
+    echo "==========================================="
+    echo -e "${GREEN}[🤖 智能模式]${PLAIN}"
+    echo "a. 🤖 自动检测并优化 (推荐)"
+    echo "-------------------------------------------"
+    echo -e "${CYAN}[通用优化]${PLAIN}"
+    echo "1. 执行网络优化 (QDisc: fq)"
+    echo "2. 执行网络优化 (QDisc: fq_codel)"
+    echo "3. 执行网络优化 (QDisc: fq_pie)"
+    echo "4. 执行网络优化 (QDisc: cake)"
+    echo "-------------------------------------------"
+    echo -e "${CYAN}[协议专用优化]${PLAIN}"
+    echo "5. Hysteria2 专用优化 (UDP/QUIC)"
+    echo "6. VLESS-WS 专用优化 (TCP/WebSocket)"
+    echo "7. VLESS-XTLS/Reality 专用优化 (TCP/TLS + UDP透传)"
+    echo "8. VLESS-WS (CDN) 专用优化 (针对 Cloudflare)"
+    echo "9. 混合模式 (全协议兼容)"
+    echo "-------------------------------------------"
+    echo "10. 恢复原始系统配置"
+    echo "0. 退出"
+    echo "-------------------------------------------"
+    echo "u. 检查并更新脚本"
+    echo "==========================================="
+    read -p "请输入选项 [a, u, 0-9]: " choice
+    
+    case "$choice" in
+        u|U) QDISC="update" ;;
+        a|A) QDISC="auto" ;;
+        1) QDISC="fq" ;;
+        2) QDISC="fq_codel" ;;
+        3) QDISC="fq_pie" ;;
+        4) QDISC="cake" ;;
+        5) QDISC="hysteria2" ;;
+        6) QDISC="vless-ws" ;;
+        7) QDISC="vless-xtls" ;;
+        8) QDISC="ws-cdn" ;;
+        9) QDISC="mixed" ;;
+        10) QDISC="RESTORE" ;;
+        0) exit 0 ;;
+        *) echo "无效选项"; exit 1 ;;
+    esac
+}
+
+# --- 主流程 ---
 main() {
-  parse_arguments "$@"
+    # 解析选项参数
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -y)
+                AUTO_YES=true
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            auto)
+                QDISC="auto"
+                shift
+                ;;
+            fq|fq_codel|fq_pie|cake)
+                QDISC="$1"
+                shift
+                ;;
+            hysteria2|hy2)
+                QDISC="hysteria2"
+                shift
+                ;;
+            vless-ws|vless_ws)
+                QDISC="vless-ws"
+                shift
+                ;;
+            ws-cdn|cdn)
+                QDISC="ws-cdn"
+                shift
+                ;;
+            vless-xtls|vless_xtls|vless-reality|xtls|reality)
+                QDISC="vless-xtls"
+                shift
+                ;;
+            vless)
+                # 向后兼容，默认指向 vless-ws
+                QDISC="vless-ws"
+                shift
+                ;;
+            mixed)
+                QDISC="mixed"
+                shift
+                ;;
+            restore)
+                QDISC="RESTORE"
+                shift
+                ;;
+            *)
+                echo -e "${RED}未知参数: $1${PLAIN}"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
 
-  check_permission
-  check_environment
-  check_hysteria_user "hysteria"
-  check_hysteria_homedir "/var/lib/$HYSTERIA_USER"
-
-  case "$OPERATION" in
-    "install")
-      perform_install
-      ;;
-    "remove")
-      perform_remove
-      ;;
-    "check_update")
-      perform_check_update
-      ;;
-    *)
-      error "Unknown operation '$OPERATION'."
-      ;;
-  esac
+    check_root
+    check_kernel
+    check_dependencies
+    update_system
+    install_shortcut
+    
+    # 如果未通过参数指定 QDISC，显示菜单
+    if [[ -z "${QDISC:-}" ]]; then
+        show_menu
+    fi
+    
+    case "$QDISC" in
+        RESTORE)
+            restore_original_config
+            ;;
+        update)
+            check_update
+            show_menu
+            ;;
+        auto)
+            apply_auto_optimization
+            verify_auto_status
+            ;;
+        hysteria2)
+            apply_hysteria2_optimization
+            verify_status "hysteria2"
+            ;;
+        vless-ws)
+            apply_vless_ws_optimization
+            verify_status "vless-ws"
+            ;;
+        ws-cdn)
+            apply_vless_ws_cdn_optimization
+            verify_status "ws-cdn"
+            ;;
+        vless-xtls)
+            apply_vless_xtls_optimization
+            verify_status "vless-xtls"
+            ;;
+        mixed)
+            apply_mixed_optimization
+            verify_status "mixed"
+            ;;
+        *)
+            apply_optimization "$QDISC"
+            verify_status "$QDISC"
+            ;;
+    esac
 }
 
 main "$@"
-
-# vim:set ft=bash ts=2 sw=2 sts=2 et:
