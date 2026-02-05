@@ -198,7 +198,7 @@ check_bbr_version() {
     
     if modinfo tcp_bbr &>/dev/null; then
         bbr_info=$(modinfo tcp_bbr)
-        bbr_ver=$(echo "$bbr_info" | grep "^version:" | awk '{print $2}')
+        bbr_ver=$(echo "$bbr_info" | grep "^version:" | awk '{print $2}' || true)
     fi
 
     if [[ "$bbr_ver" == "3" ]]; then
