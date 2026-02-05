@@ -6,7 +6,6 @@
 # - 自动模块加载与持久化
 # - 支持非交互模式 (-y)
 # - Hysteria2 / VLESS-WS / VLESS-XTLS 协议专用优化
-# - 🤖 智能自动调优 (基于 BDP 动态计算带宽延迟积)
 # - 🚀 自动安装 'bb' 快捷指令
 # =========================================================
 set -Eeuo pipefail
@@ -40,10 +39,7 @@ log() {
 }
 
 show_help() {
-    echo "用法: $0 [-y] [auto|fq|fq_codel|fq_pie|cake|hysteria2|vless-ws|vless-xtls|mixed|restore]"
-    echo ""
-    echo "🤖 智能模式:"
-    echo "  auto                         自动检测硬件/网络并优化 (推荐)"
+    echo "用法: $0 [-y] [fq|fq_codel|fq_pie|cake|hysteria2|vless-ws|vless-xtls|mixed|restore]"
     echo ""
     echo "通用优化选项:"
     echo "  fq, fq_codel, fq_pie, cake  选择队列调度算法 (BBR + TCP)"
@@ -61,8 +57,6 @@ show_help() {
     echo ""
     echo "示例:"
     echo "  $0                 # 交互式菜单"
-    echo "  $0 auto            # 🤖 智能自动调优"
-    echo "  $0 -y auto         # 非交互智能调优"
     echo "  $0 fq              # 直接使用 fq 算法"
     echo "  $0 hysteria2       # Hysteria2 专用优化"
     echo "  $0 ws-cdn          # VLESS-WS (Cloudflare CDN) 优化"
@@ -139,7 +133,7 @@ check_update() {
             if echo "$latest_script" > "$0"; then
                 chmod +x "$0"
                 log "✅ 更新成功! 正在重启脚本..."
-                exec "$0" "auto" # 重启并进入 auto 模式或菜单
+                exec "$0" # 重启并进入菜单
             else
                 echo -e "${RED}❌ 更新写入失败${PLAIN}"
             fi
@@ -212,270 +206,6 @@ check_bbr_version() {
     # 检查当前运行状态
     local current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "none")
     echo -e "当前运行算法: ${GREEN}$current_cc${PLAIN}"
-}
-
-# --- 🤖 系统检测函数 ---
-detect_system_info() {
-    echo -e "\n${CYAN}--- 🔍 系统检测 ---${PLAIN}"
-    
-    # 1. 硬件检测
-    CPU_CORES=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
-    echo -e "CPU 核心数: ${GREEN}$CPU_CORES${PLAIN}"
-    
-    MEM_TOTAL_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
-    MEM_TOTAL_MB=$((MEM_TOTAL_KB / 1024))
-    MEM_TOTAL_GB=$(echo "scale=1; $MEM_TOTAL_MB / 1024" | bc 2>/dev/null || echo "$((MEM_TOTAL_MB / 1024))")
-    echo -e "内存大小: ${GREEN}${MEM_TOTAL_GB}GB${PLAIN} (${MEM_TOTAL_MB}MB)"
-    
-    # 磁盘检测 (支持 NVMe/SATA/VirtIO)
-    DISK_TYPE="HDD"
-    # 检查常见块设备
-    for disk in /sys/block/{sd,vd,nvme}*; do
-        if [[ -f "$disk/queue/rotational" ]]; then
-            if [[ $(cat "$disk/queue/rotational") == "0" ]]; then
-                DISK_TYPE="SSD"
-                break
-            fi
-        fi
-    done
-    echo -e "磁盘类型: ${GREEN}$DISK_TYPE${PLAIN}"
-    
-    # 2. 网络质量检测
-    log "正在测试网络性能 (Ping & Bandwidth)..."
-    
-    # 延迟测试 (多目标取平均)
-    local targets=("8.8.8.8" "1.1.1.1" "223.5.5.5")
-    local total_rtt=0
-    local valid_count=0
-    
-    for target in "${targets[@]}"; do
-        local rtt=$(ping -c 2 -W 1 "$target" 2>/dev/null | tail -1 | awk -F'/' '{print $5}' | cut -d. -f1)
-        if [[ -n "$rtt" ]]; then
-            total_rtt=$((total_rtt + rtt))
-            ((valid_count++))
-        fi
-    done
-    
-    if [[ $valid_count -gt 0 ]]; then
-        NET_LATENCY=$((total_rtt / valid_count))
-    else
-        NET_LATENCY=50  # 默认值
-    fi
-    echo -e "网络延迟 (AVG): ${GREEN}${NET_LATENCY}ms${PLAIN}"
-    
-    # 带宽估算 (尝试从 fast.com 或 cloudflare 测速，超时回退到网卡协商速率)
-    # 这里使用简单的 curl 下载测速，只测 3 秒
-    local test_url="https://speed.cloudflare.com/__down?bytes=10000000" # 10MB
-    local speed_test=$(curl -L -s -w "%{speed_download}" -o /dev/null --max-time 3 "$test_url" || echo 0)
-    # curl 返回单位是 byte/s，转换为 Mbps
-    # byte/s * 8 / 1000000
-    local measured_bw_mbps=$(echo "scale=0; $speed_test * 8 / 1000000" | bc 2>/dev/null || echo 0)
-    
-    # 获取网卡协商速率作为上限
-    local link_speed=1000
-    local primary_nic=$(ip route | grep default | awk '{print $5}' | head -1)
-    if [[ -n "$primary_nic" && -f "/sys/class/net/$primary_nic/speed" ]]; then
-        local sys_speed=$(cat "/sys/class/net/$primary_nic/speed" 2>/dev/null)
-        # speed 文件可能返回 -1 或空
-        if [[ -n "$sys_speed" && "$sys_speed" -gt 0 ]]; then
-            link_speed=$sys_speed
-        fi
-    fi
-    
-    # 如果实测速度有效且合理，优先使用实测值(更真实反映线路质量)，否则使用网卡协商速率
-    if [[ "$measured_bw_mbps" -gt 1 ]]; then
-         NIC_SPEED=$measured_bw_mbps
-         echo -e "实测带宽: ${GREEN}${NIC_SPEED}Mbps${PLAIN}"
-    else
-         NIC_SPEED=$link_speed
-         echo -e "协商带宽: ${GREEN}${NIC_SPEED}Mbps${PLAIN} (测试失败，使用网卡速率)"
-    fi
-
-    # 3. 评级
-    # 判断服务器级别
-    if [[ $CPU_CORES -le 2 && $MEM_TOTAL_MB -le 2048 ]]; then
-        SERVER_TIER="low"
-    elif [[ $CPU_CORES -ge 4 && $MEM_TOTAL_MB -ge 8192 ]]; then
-        SERVER_TIER="high"
-    else
-        SERVER_TIER="medium"
-    fi
-}
-
-# 计算 BDP (Bandwidth-Delay Product)
-calculate_bdp() {
-    # BDP = 带宽(bytes/s) * RTT(s)
-    # 例如: 1Gbps * 100ms = 125MB/s * 0.1s = 12.5MB
-    local bandwidth_mbps=$1
-    local rtt_ms=$2
-    local bdp_bytes=$(( (bandwidth_mbps * 1000000 / 8) * rtt_ms / 1000 ))
-    echo $bdp_bytes
-}
-
-# --- 🤖 智能自动调优 ---
-apply_auto_optimization() {
-    log "🤖 正在执行智能自动调优..."
-    
-    # 检测系统信息
-    detect_system_info
-    
-    echo -e "\n${CYAN}--- 📊 算法参数计算 ---${PLAIN}"
-    
-    # 1. 计算 BDP (Bandwidth-Delay Product)
-    # BDP = 带宽(Mbps) * 延迟(ms) * 1000 / 8 (转换为 bytes)
-    # 示例: 100Mbps * 200ms = 2.5MB
-    local bdp_bytes=$(( NIC_SPEED * 1000000 / 8 * NET_LATENCY / 1000 ))
-    echo -e "带宽延迟积 (BDP): ${GREEN}$((bdp_bytes / 1024))KB${PLAIN}"
-    
-    # 2. 确定 TCP 窗口大小 (BDP * 安全系数 1.33)
-    local target_window=$(( bdp_bytes * 133 / 100 ))
-    # 最小限制 4MB (避免太小), 最大限制 128MB (内核限制)
-    [[ $target_window -lt 4194304 ]] && target_window=4194304
-    [[ $target_window -gt 134217728 ]] && target_window=134217728
-    
-    echo -e "目标 TCP 窗口: ${GREEN}$((target_window / 1024 / 1024))MB${PLAIN}"
-    
-    # 3. 内存安全限制 (避免 OOM)
-    # 允许最大 TCP 内存占用 = 系统总内存的 25%
-    local max_tcp_ram=$(( MEM_TOTAL_KB * 1024 / 4 )) 
-    # 如果计算出的窗口会导致过大内存压力，进行缩减
-    # 假设有 100 个并发连接跑满窗口 (保守估计)
-    local safe_limit=$(( max_tcp_ram / 100 ))
-    if [[ $target_window -gt $safe_limit ]]; then
-        echo -e "${YELLOW}警告: 目标窗口超过内存安全限制，已自动调整${PLAIN}"
-        target_window=$safe_limit
-    fi
-    
-    # 4. 设定参数
-    local rmem_max=$target_window
-    local wmem_max=$target_window
-    local tcp_rmem_max=$target_window
-    local tcp_wmem_max=$target_window
-    
-    # 其他基础参数基于层级微调
-    local somaxconn netdev_budget file_max
-    case "$SERVER_TIER" in
-        low)
-            somaxconn=4096; netdev_budget=300; file_max=262144
-            ;;
-        high)
-            somaxconn=65535; netdev_budget=600; file_max=6815744
-            ;;
-        *)
-            somaxconn=32768; netdev_budget=500; file_max=6815744
-            ;;
-    esac
-    
-    # 计算 tcp_mem (页单位)
-    local mem_pages=$((MEM_TOTAL_KB * 1024 / 4096))
-    local tcp_mem_min=$((mem_pages / 16))
-    local tcp_mem_pressure=$((mem_pages / 8))
-    local tcp_mem_max=$((mem_pages / 4))
-    
-    echo -e "配置结果 -> rmem_max: $((rmem_max/1024/1024))MB | somaxconn: $somaxconn"
-    
-    # 备份环境准备
-    mkdir -p "$ORIGINAL_BACKUP_DIR" "$HISTORY_BACKUP_DIR"
-    local timestamp=$(date +%Y%m%d_%H%M%S)
-    
-    local files=("$SYSCTL_CONF" "$LIMITS_CONF" "$SYSTEMD_CONF")
-    for file in "${files[@]}"; do
-        if [[ -f "$file" ]]; then
-            local base_name=$(basename "$file")
-            if [[ ! -f "$ORIGINAL_BACKUP_DIR/$base_name.orig" ]]; then
-                cp "$file" "$ORIGINAL_BACKUP_DIR/$base_name.orig"
-                log "💾 已创建原始备份: $base_name.orig"
-            fi
-            cp "$file" "$HISTORY_BACKUP_DIR/$base_name.$timestamp.bak"
-        fi
-    done
-    
-    find "$HISTORY_BACKUP_DIR" -name "*.bak" -type f 2>/dev/null | sort -r | tail -n +$((MAX_HISTORY_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
-    
-    # 加载模块
-    if ! lsmod | grep -q tcp_bbr; then
-        modprobe tcp_bbr &>/dev/null || true
-        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
-    fi
-    load_qdisc_module "fq"
-    modprobe nf_conntrack &>/dev/null || true
-    
-    apply_limits_optimization
-    
-    echo -e "\n${CYAN}--- 📝 应用配置 ---${PLAIN}"
-    cat > "$SYSCTL_CONF" << EOF
-# ==========================================
-# 🤖 Smart Auto-Tuned Network Optimization
-# Generated by bbr.sh v7.2 at $(date)
-# Original backup at: $ORIGINAL_BACKUP_DIR
-# ==========================================
-# 诊断数据:
-#   CPU: ${CPU_CORES}c | 内存: ${MEM_TOTAL_GB}GB | 磁盘: $DISK_TYPE
-#   带宽(est): ${NIC_SPEED}Mbps | 延迟(avg): ${NET_LATENCY}ms
-#   BDP: $((bdp_bytes)) bytes | Target Window: $target_window bytes
-# ==========================================
-
-# --- 核心网络参数 (BBR + fq) ---
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-
-# --- 文件描述符 ---
-fs.file-max = $file_max
-
-# --- 动态缓冲区 (基于 BDP) ---
-net.core.rmem_max = $rmem_max
-net.core.wmem_max = $wmem_max
-net.core.rmem_default = $((rmem_max / 2))
-net.core.wmem_default = $((wmem_max / 2))
-# tcp_rmem: min default max
-net.ipv4.tcp_rmem = 4096 $((tcp_rmem_max / 2)) $tcp_rmem_max
-net.ipv4.tcp_wmem = 4096 $((tcp_wmem_max / 2)) $tcp_wmem_max
-net.ipv4.tcp_mem = $tcp_mem_min $tcp_mem_pressure $tcp_mem_max
-net.ipv4.udp_rmem_min = 8192
-net.ipv4.udp_wmem_min = 8192
-
-# --- 网络队列 ---
-net.core.somaxconn = $somaxconn
-net.core.netdev_max_backlog = $((somaxconn * 2))
-net.core.netdev_budget = $netdev_budget
-net.core.netdev_budget_usecs = 8000
-
-# --- TCP 行为优化 ---
-net.ipv4.tcp_notsent_lowat = 16384
-net.ipv4.tcp_no_metrics_save = 1
-net.ipv4.tcp_sack = 1
-net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = 1
-net.ipv4.tcp_moderate_rcvbuf = 1
-net.ipv4.tcp_slow_start_after_idle = 0
-
-# --- 连接优化 ---
-net.ipv4.tcp_keepalive_time = 600
-net.ipv4.tcp_keepalive_intvl = 30
-net.ipv4.tcp_keepalive_probes = 10
-net.ipv4.tcp_fin_timeout = 10
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_max_syn_backlog = $((somaxconn / 2))
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_fastopen = 3
-
-# --- UDP 连接追踪 ---
-net.netfilter.nf_conntrack_udp_timeout = 60
-net.netfilter.nf_conntrack_udp_timeout_stream = 180
-
-# --- 转发开启 ---
-net.ipv4.ip_forward = 1
-net.ipv4.conf.all.forwarding = 1
-net.ipv4.conf.default.forwarding = 1
-net.ipv6.conf.all.forwarding = 1
-net.ipv6.conf.default.forwarding = 1
-EOF
-
-    if sysctl --system &>/dev/null; then
-        echo -e "${GREEN}✅ 智能自动调优(v7.1) 已应用!${PLAIN}"
-    else
-        echo -e "${RED}⚠️  sysctl 应用失败${PLAIN}"
-    fi
 }
 
 # --- 模块管理 ---
@@ -1329,29 +1059,6 @@ verify_status() {
     esac
 }
 
-# 智能模式验证
-verify_auto_status() {
-    echo -e "\n${CYAN}--- 智能调优验证 ---${PLAIN}"
-    local cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-    local qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
-    local ul=$(ulimit -n)
-    local rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "0")
-    local wmem=$(sysctl -n net.core.wmem_max 2>/dev/null || echo "0")
-    
-    echo -e "拥塞控制: ${GREEN}$cc${PLAIN}"
-    echo -e "队列调度: ${GREEN}$qd${PLAIN}"
-    echo -e "文件句柄: ${GREEN}$ul${PLAIN}"
-    echo -e "rmem_max: ${GREEN}$((rmem / 1048576))MB${PLAIN}"
-    echo -e "wmem_max: ${GREEN}$((wmem / 1048576))MB${PLAIN}"
-    
-    if [[ "$cc" == "bbr" && "$qd" == "fq" ]]; then
-        echo -e "${GREEN}✨ 智能自动调优成功生效!${PLAIN}"
-        echo -e "${CYAN}提示: 参数已根据您的硬件和网络状况智能计算${PLAIN}"
-    else
-        echo -e "${YELLOW}⚠️  配置似乎未完全生效，建议重启系统。${PLAIN}"
-    fi
-}
-
 # --- 菜单逻辑 ---
 show_menu() {
     clear
@@ -1360,9 +1067,6 @@ show_menu() {
     echo "==========================================="
     check_bbr_version
     echo "==========================================="
-    echo -e "${GREEN}[🤖 智能模式]${PLAIN}"
-    echo "a. 🤖 自动检测并优化 (推荐)"
-    echo "-------------------------------------------"
     echo -e "${CYAN}[通用优化]${PLAIN}"
     echo "1. 执行网络优化 (QDisc: fq)"
     echo "2. 执行网络优化 (QDisc: fq_codel)"
@@ -1382,11 +1086,10 @@ show_menu() {
     echo "-------------------------------------------"
     echo "u. 检查并更新脚本"
     echo "==========================================="
-    read -p "请输入选项 [a, u, 0-9]: " choice
+    read -p "请输入选项 [u, 0-9]: " choice
     
     case "$choice" in
         u|U) QDISC="update" ;;
-        a|A) QDISC="auto" ;;
         1) QDISC="fq" ;;
         2) QDISC="fq_codel" ;;
         3) QDISC="fq_pie" ;;
@@ -1412,17 +1115,13 @@ main() {
                 AUTO_YES=true
                 shift
                 ;;
-            -h|--help)
-                show_help
-                exit 0
-                ;;
-            auto)
-                QDISC="auto"
-                shift
-                ;;
-            fq|fq_codel|fq_pie|cake)
-                QDISC="$1"
-                shift
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        fq|fq_codel|fq_pie|cake)
+            QDISC="$1"
+            shift
                 ;;
             hysteria2|hy2)
                 QDISC="hysteria2"
@@ -1483,10 +1182,6 @@ main() {
         update)
             check_update
             show_menu
-            ;;
-        auto)
-            apply_auto_optimization
-            verify_auto_status
             ;;
         hysteria2)
             apply_hysteria2_optimization
