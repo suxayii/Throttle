@@ -5,15 +5,14 @@
 ![Last Commit](https://img.shields.io/github/last-commit/suxayii/Throttle?label=Last%20Commit)
 [🇨🇳 中文文档](README.md) | [🇺🇸 English](README_EN.md)
 
-本项目致力于提供一套高效、易用的 Linux 服务器网络管理与优化脚本，涵盖端口限速、BBR 内核优化、以及常用代理服务（Hysteria2, GOST）的便捷部署。
+本项目致力于提供一套高效、易用的 Linux 服务器网络管理与优化脚本，涵盖端口限速、BBR 内核优化、以及常用代理服务（GOST）的便捷部署。
 
 ## 📖 目录
 
 - [包含的工具](#-包含的工具)
   - [1. 端口限速工具 (Throttle.sh)](#1-端口限速工具-throttlesh)
   - [2. BBR 网络优化脚本 (bbr.sh)](#2-bbr-网络优化脚本-bbrsh)
-  - [3. Hysteria2 管理脚本 (hysteria2.sh)](#3-hysteria2-管理脚本-hysteria2sh)
-  - [4. GOST 代理部署脚本 (gost-proxy.sh)](#4-gost-代理部署脚本-gost-proxysh)
+  - [3. GOST 代理部署脚本 (gost-proxy.sh)](#3-gost-代理部署脚本-gost-proxysh)
 - [🚀 快速开始](#-快速开始)
 - [📋 系统要求](#-系统要求)
 - [🤝 贡献与反馈](#-贡献与反馈)
@@ -35,33 +34,24 @@
 
 ### 2. BBR 网络优化脚本 (`bbr.sh`)
 
-全能型 Linux 网络优化助手，集成多种 BBR 算法与系统级参数调优。
+全能型 Linux 网络优化助手，集成多种 BBR 算法与系统级参数调优，支持内核管理。
 
 -   **核心功能**：
     -   **内核优化**：开启 BBR，优化 TCP 窗口、缓冲区大小（默认 32MB+），提升高延迟网络下的吞吐量。
-    -   **激进模式**：新增针对晚高峰和网络抖动的激进优化模式（fq_codel + initcwnd=32 + TCP Fast Open）。
-    -   **算法切换**：支持一键切换 `fq`、`fq_codel`、`fq_pie`、`cake` 等队列调度算法。
-    -   **原始备份**：支持一键锁定备份系统原始配置（永不覆盖），确保可随时无损还原。
-    -   **智能辅助**：内置网络延迟/下载测速工具，自动检测 BBR 版本，支持一键升级内核（Debian/CentOS）。
-    -   **场景化优化**：针对 Hysteria2 (UDP/QUIC) 和 VLESS (TCP/WS/TLS) 提供特定的内核参数调整。
+    -   **激进模式**：针对晚高峰和网络抖动的深度优化模式，采用 `fq_codel` 队列算法，配合 `initcwnd=32` 和 TCP Fast Open，显著降低延迟并加速连接建立。
+    -   **备份与还原**：支持一键备份当前配置，并未提供“原始系统配置”的永久备份功能，确保可随时无损还原。
+    -   **内核管理**：自动检测 BBR 版本，支持 Debian/Ubuntu/CentOS 系统一键升级到支持 BBR 的最新内核。
+    -   **智能辅助**：内置网络延迟/下载测速工具，Pre-check 预检查机制确保系统环境符合要求。
     -   **便捷命令**：安装后可通过 `bb` 命令快速唤醒菜单。
 
-### 3. Hysteria2 管理脚本 (`hysteria2.sh`)
+### 3. GOST 代理部署脚本 (`gost-proxy.sh`)
 
-Hysteria2 服务端的一键全托管脚本。
-
--   **核心功能**：
-    -   **生命周期管理**：一键安装、更新、卸载。
-    -   **版本控制**：支持安装最新版或自定义版本。
-    -   **服务托管**：通过 Systemd 管理服务，支持开机自启、状态监控与日志查看。
-    -   **配置灵活**：支持自定义配置文件路径与启动参数。
-
-### 4. GOST 代理部署脚本 (`gost-proxy.sh`)
-
-极简的 GOST 隧道/代理服务部署工具。
+极简的 GOST 隧道/代理服务部署工具 (v2.0)。
 
 -   **核心功能**：
     -   **多模式支持**：SOCKS5、HTTP、或 SOCKS5+HTTP 双协议共存。
+    -   **多节点管理**：支持添加多个代理节点，独立配置端口和认证信息。
+    -   **灵活控制**：支持暂停/恢复特定代理节点，不影响其他服务运行。
     -   **安全认证**：支持设置用户名与密码认证。
     -   **智能检测**：部署前自动检测端口冲突。
     -   **服务守护**：自动创建 Systemd 服务配置，确保服务稳定运行。
@@ -97,12 +87,7 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 ```
 > 安装后可直接输入 `bb` 命令管理。
 
-#### 3. Hysteria2 安装
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/hysteria2.sh)
-```
-
-#### 4. GOST 代理部署
+#### 3. GOST 代理部署
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
 ```

@@ -5,15 +5,14 @@
 ![Last Commit](https://img.shields.io/github/last-commit/suxayii/Throttle?label=Last%20Commit)
 [🇨🇳 中文文档](README.md) | [🇺🇸 English](README_EN.md)
 
-This project provides a set of efficient and easy-to-use Linux server network management and optimization scripts, covering port throttling, BBR kernel optimization, and convenient deployment of common proxy services (Hysteria2, GOST).
+This project provides a set of efficient and easy-to-use Linux server network management and optimization scripts, covering port throttling, BBR kernel optimization, and convenient deployment of common proxy services (GOST).
 
 ## 📖 Table of Contents
 
 - [Included Tools](#-included-tools)
   - [1. Port Throttle Tool (Throttle.sh)](#1-port-throttle-tool-throttlesh)
   - [2. BBR Optimization Script (bbr.sh)](#2-bbr-optimization-script-bbrsh)
-  - [3. Hysteria2 Management Script (hysteria2.sh)](#3-hysteria2-management-script-hysteria2sh)
-  - [4. GOST Proxy Script (gost-proxy.sh)](#4-gost-proxy-script-gost-proxysh)
+  - [3. GOST Proxy Script (gost-proxy.sh)](#3-gost-proxy-script-gost-proxysh)
 - [🚀 Quick Start](#-quick-start)
 - [📋 System Requirements](#-system-requirements)
 - [🤝 Contributing](#-contributing)
@@ -35,33 +34,24 @@ A precise port throttling tool based on `tc` (Traffic Control) and `iptables`, d
 
 ### 2. BBR Optimization Script (`bbr.sh`)
 
-An all-in-one Linux network optimization assistant, integrating various BBR algorithms and system-level parameter tuning.
+An all-in-one Linux network optimization assistant, integrating various BBR algorithms and system-level parameter tuning, with kernel management support.
 
 -   **Key Features**:
     -   **Kernel Optimization**: Enables BBR, optimizes TCP windows and buffer sizes (default 32MB+) to improve throughput in high-latency networks.
-    -   **Aggressive Mode**: New aggressive optimization mode for peak hours and jittery networks (fq_codel + initcwnd=32 + TCP Fast Open).
-    -   **Algorithm Switching**: Supports one-click switching between `fq`, `fq_codel`, `fq_pie`, `cake`, and other queue scheduling algorithms.
-    -   **Pristine Backup**: Supports one-click immutable backup of original system config, ensuring safe restoration at any time.
-    -   **Smart Diagnostics**: Built-in network latency/speed tests, auto BBR version detection, and one-click kernel upgrade (Debian/CentOS).
-    -   **Scenario-Based Optimization**: Provides specific kernel parameter adjustments for Hysteria2 (UDP/QUIC) and VLESS (TCP/WS/TLS).
+    -   **Aggressive Mode**: A new deep optimization mode for peak hours and network jitter, utilizing `fq_codel` queue algorithm along with `initcwnd=32` and TCP Fast Open to significantly reduce latency and accelerate connection establishment.
+    -   **Backup & Restore**: Supports one-click backup of current configurations and provides an immutable "Pristine System Backup" for safe restoration at any time.
+    -   **Kernel Management**: Automatically detects BBR versions and supports one-click kernel upgrades for Debian/Ubuntu/CentOS to support BBR.
+    -   **Smart Diagnostics**: Built-in network latency/speed tests and a Pre-check mechanism to ensure system environment compliance.
     -   **Quick Command**: Accessible via the `bb` command after installation.
 
-### 3. Hysteria2 Management Script (`hysteria2.sh`)
+### 3. GOST Proxy Script (`gost-proxy.sh`)
 
-A one-click fully managed script for Hysteria2 server.
-
--   **Key Features**:
-    -   **Lifecycle Management**: One-click installation, update, and uninstallation.
-    -   **Version Control**: Supports installing the latest or a custom version.
-    -   **Service Hosting**: Manages service via Systemd, supporting auto-start on boot, status monitoring, and log viewing.
-    -   **Flexible Configuration**: Supports custom configuration file paths and startup parameters.
-
-### 4. GOST Proxy Script (`gost-proxy.sh`)
-
-A minimalist deployment tool for GOST tunnel/proxy services.
+A minimalist deployment tool for GOST tunnel/proxy services (v2.0).
 
 -   **Key Features**:
     -   **Multi-Mode Support**: Supports SOCKS5, HTTP, or co-existing SOCKS5+HTTP dual protocols.
+    -   **Multi-Node Management**: Supports adding multiple proxy nodes with independent port and authentication settings.
+    -   **Flexible Control**: Supports pausing/resuming specific proxy nodes without affecting other running services.
     -   **Security**: Supports setting username and password authentication.
     -   **Smart Detection**: Automatically checks for port conflicts before deployment.
     -   **Service Daemon**: Automatically creates Systemd service configuration to ensure stable operation.
@@ -97,12 +87,7 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 ```
 > After installation, you can directly use the `bb` command to manage it.
 
-#### 3. Hysteria2 Installation
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/hysteria2.sh)
-```
-
-#### 4. GOST Proxy Deployment
+#### 3. GOST Proxy Deployment
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
 ```
