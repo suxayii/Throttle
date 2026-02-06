@@ -65,6 +65,9 @@ do_precheck() {
     kernel=$(uname -r 2>/dev/null)
     echo "内核版本: ${kernel:-N/A}"
 
+    # 尝试加载模块
+    modprobe tcp_bbr >/dev/null 2>&1 || true
+
     local avail_cc
     avail_cc=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)
     if [[ -n "$avail_cc" ]]; then
@@ -248,6 +251,12 @@ net.ipv4.udp_wmem_min = 8192
 # - 不包含 IP 转发 / NAT / 透明代理参数
 ############################################################
 EOF
+
+    # 确保模块在重启后能自动加载
+    if ! grep -q "tcp_bbr" /etc/modules-load.d/*.conf 2>/dev/null; then
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+        ok "已添加 tcp_bbr 到自动加载列表 (/etc/modules-load.d/bbr.conf)"
+    fi
 
     echo "▶ 正在加载 sysctl 参数..."
     if sysctl --system >/dev/null; then
