@@ -39,9 +39,11 @@ An all-in-one Linux network optimization assistant, integrating various BBR algo
 
 -   **Key Features**:
     -   **Kernel Optimization**: Enables BBR, optimizes TCP windows and buffer sizes (default 32MB+) to improve throughput in high-latency networks.
+    -   **Aggressive Mode**: New aggressive optimization mode for peak hours and jittery networks (fq_codel + initcwnd=32 + TCP Fast Open).
     -   **Algorithm Switching**: Supports one-click switching between `fq`, `fq_codel`, `fq_pie`, `cake`, and other queue scheduling algorithms.
+    -   **Pristine Backup**: Supports one-click immutable backup of original system config, ensuring safe restoration at any time.
+    -   **Smart Diagnostics**: Built-in network latency/speed tests, auto BBR version detection, and one-click kernel upgrade (Debian/CentOS).
     -   **Scenario-Based Optimization**: Provides specific kernel parameter adjustments for Hysteria2 (UDP/QUIC) and VLESS (TCP/WS/TLS).
-    -   **System Enhancement**: Automatically lifts file descriptor limits (Limit NOFILE).
     -   **Quick Command**: Accessible via the `bb` command after installation.
 
 ### 3. Hysteria2 Management Script (`hysteria2.sh`)
