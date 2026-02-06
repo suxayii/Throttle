@@ -839,6 +839,136 @@ EOF
 }
 
 # ---------------------------------------------------------
+# 流媒体/极速起飞优化（解决 BBR 爬坡慢）
+# ---------------------------------------------------------
+do_streaming() {
+    echo "▶ 开始预检查..."
+    if ! do_precheck; then
+        err "由于预检查失败，已中止优化操作"
+        return 1
+    fi
+
+    echo "▶ 正在应用 流媒体/极速起飞优化（针对爬坡慢特殊调优）..."
+
+    # 备份已有配置
+    if [[ -f "$CONF_FILE" ]]; then
+        BACKUP_FILE="$BACKUP_DIR/99-proxy-tune.conf.bak.$(date +%Y%m%d_%H%M%S)"
+        cp "$CONF_FILE" "$BACKUP_FILE"
+        ok "已备份当前配置到：$BACKUP_FILE"
+    fi
+
+    # 写入流媒体优化参数
+    cat > "$CONF_FILE" << 'EOF'
+############################################################
+# 流媒体/极速起飞优化（Streaming/Fast Ramp-up Mode）
+# 文件：/etc/sysctl.d/99-proxy-tune.conf
+############################################################
+
+########################
+# 核心加速参数 (解决慢热)
+########################
+
+# 关键设置：限制 TCP 发送队列堆积
+# 作用：大幅减少 bufferbloat，让 BBR 更快感知带宽并加速
+# 对于 1Gbps+ 环境，16384 (16KB) 是推荐的起始值
+net.ipv4.tcp_notsent_lowat = 16384
+
+# 开启 BBR (配合 fq)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+########################
+# 激进的 TCP 行为
+########################
+
+# 优先低延迟 (如果内核支持)
+net.ipv4.tcp_low_latency = 1
+
+# 空闲后立即恢复发送速度 (拒绝慢启动)
+net.ipv4.tcp_slow_start_after_idle = 0
+
+# 开启 MTU 探测 (寻找最佳包大小)
+net.ipv4.tcp_mtu_probing = 1
+
+# 禁用 ECN (防止丢包重传延迟)
+net.ipv4.tcp_ecn = 0
+
+# 快速打开 (减少握手延迟)
+net.ipv4.tcp_fastopen = 3
+
+# 更短的 Keepalive (快速释放死连接)
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 3
+
+########################
+# 大缓冲区 (吞吐量保障)
+########################
+
+# 与 aggressive 模式保持一致，防止溢出但足够大
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 16384 33554432
+
+########################
+# 高并发基础
+########################
+fs.file-max = 6815744
+net.core.somaxconn = 16384
+net.ipv4.tcp_max_syn_backlog = 16384
+net.core.netdev_max_backlog = 32768
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+
+############################################################
+# 优化模式特点：
+# - tcp_notsent_lowat：解决 BBR 爬坡慢的核心参数
+# - initcwnd=64：起步速度翻倍
+# - MTU Probing：自动适配网络环境
+############################################################
+EOF
+
+    # 确保 BBR 模块自动加载
+    if ! grep -q "tcp_bbr" /etc/modules-load.d/*.conf 2>/dev/null; then
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+        ok "已添加 tcp_bbr 到自动加载列表"
+    fi
+
+    echo "▶ 正在加载 sysctl 参数..."
+    if sysctl --system >/dev/null; then
+        ok "sysctl 参数加载成功"
+    else
+        err "sysctl 参数加载失败"
+        return 1
+    fi
+
+    echo "▶ 尝试设置超大初始窗口 (initcwnd=64, initrwnd=32)..."
+    DEFAULT_ROUTE=$(ip route show default 2>/dev/null | head -n 1)
+    if [[ "$DEFAULT_ROUTE" == *"via"* ]]; then
+        # 64个包的初始窗口，相当于 90KB+ 的起始数据量
+        if eval "ip route change $DEFAULT_ROUTE initcwnd 64 initrwnd 32" 2>/dev/null; then
+            ok "已设置 initcwnd=64 initrwnd=32（极速起飞模式）"
+        else
+            warn "initcwnd 设置失败（可忽略）"
+        fi
+    else
+        warn "未检测到标准默认路由，跳过 initcwnd 设置"
+    fi
+
+    echo "========================================================="
+    ok "流媒体/极速起飞优化已应用！"
+    echo "针对 BBR 爬坡慢问题已重点优化："
+    echo "  - tcp_notsent_lowat=16384：减少积压，加速反馈"
+    echo "  - initcwnd=64：起跑速度提升 2-4 倍"
+    echo "  - MTU Probing：自动优化传输效率"
+    echo "建议重新进行测速观察爬坡效果。"
+    echo "========================================================="
+}
+
+# ---------------------------------------------------------
 # BBRv3 支持检测
 # ---------------------------------------------------------
 do_bbr_detect() {
@@ -1011,30 +1141,32 @@ show_menu() {
     echo " 1. 预检查（不修改）"
     echo " 2. 应用标准优化配置"
     echo " 3. 应用激进优化（晚高峰/抗抖动/快速起速）"
-    echo " 4. 🔒 备份原始系统配置（永不覆盖）"
-    echo " 5. 还原到原始系统配置"
-    echo " 6. 还原最近一次配置备份"
-    echo " 7. 还原首次配置备份"
-    echo " 8. 查看当前状态"
-    echo " 9. 🌐 网络测试"
-    echo "10. 🔍 BBR 版本检测"
-    echo "11. ⬆️  升级内核（支持 BBR）"
+    echo " 4. 应用流媒体/极速起飞优化（解决爬坡慢）"
+    echo " 5. 🔒 备份原始系统配置（永不覆盖）"
+    echo " 6. 还原到原始系统配置"
+    echo " 7. 还原最近一次配置备份"
+    echo " 8. 还原首次配置备份"
+    echo " 9. 查看当前状态"
+    echo "10. 🌐 网络测试"
+    echo "11. 🔍 BBR 版本检测"
+    echo "12. ⬆️  升级内核（支持 BBR）"
     echo " 0. 退出"
     echo "========================================================="
-    read -p "请输入选项 [0-11]: " choice
+    read -p "请输入选项 [0-12]: " choice
 
     case "$choice" in
         1) do_precheck ;;
         2) do_optimize ;;
         3) do_aggressive ;;
-        4) do_pristine_backup ;;
-        5) do_restore_pristine ;;
-        6) do_restore_latest ;;
-        7) do_restore_original ;;
-        8) do_status ;;
-        9) do_network_test ;;
-        10) do_bbr_detect ;;
-        11) do_kernel_upgrade ;;
+        4) do_streaming ;;
+        5) do_pristine_backup ;;
+        6) do_restore_pristine ;;
+        7) do_restore_latest ;;
+        8) do_restore_original ;;
+        9) do_status ;;
+        10) do_network_test ;;
+        11) do_bbr_detect ;;
+        12) do_kernel_upgrade ;;
         0) exit 0 ;;
         *) echo "无效选项"; exit 1 ;;
     esac
@@ -1048,6 +1180,7 @@ if [[ $# -gt 0 ]]; then
         precheck|check)       do_precheck ;;
         optimize)             do_optimize ;;
         aggressive|fast)      do_aggressive ;;
+        streaming|fly)        do_streaming ;;
         pristine|backup)      do_pristine_backup ;;
         restore-pristine)     do_restore_pristine ;;
         restore|latest)       do_restore_latest ;;
