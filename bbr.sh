@@ -690,7 +690,7 @@ do_aggressive() {
         return 1
     fi
 
-    echo "▶ 正在应用 激进优化配置（晚高峰/抗抖动模式）..."
+    echo "▶ 正在应用 激进优化配置（稳定/低延迟模式）..."
 
     # 备份已有配置
     if [[ -f "$CONF_FILE" ]]; then
@@ -702,7 +702,7 @@ do_aggressive() {
     # 写入激进优化参数
     cat > "$CONF_FILE" << 'EOF'
 ############################################################
-# 激进优化配置（晚高峰/抗抖动/快速起速）
+# 激进优化配置（稳定/低延迟模式）
 # 文件：/etc/sysctl.d/99-proxy-tune.conf
 ############################################################
 
@@ -715,9 +715,8 @@ fs.file-max = 6815744
 # 队列与拥塞控制
 ########################
 
-# 使用 fq_codel：更好的抗缓冲膨胀（bufferbloat）能力
-# 相比 fq，能更智能地管理队列延迟
-net.core.default_qdisc = fq_codel
+# 使用 fq：BBR 最佳搭档，支持 pacing（定速），减少抖动
+net.core.default_qdisc = fq
 
 # BBR 拥塞控制
 net.ipv4.tcp_congestion_control = bbr
@@ -758,25 +757,21 @@ net.ipv4.tcp_keepalive_probes = 3
 # 启用 TCP 时间戳（RTT 测量更精确）
 net.ipv4.tcp_timestamps = 1
 
-# 降低重传超时的最小值（更快重传）
-net.ipv4.tcp_retries1 = 3
-net.ipv4.tcp_retries2 = 8
-
 ########################
-# 缓冲区配置（中等偏激进）
+# 缓冲区配置（平衡模式）
 ########################
 
-# 系统级最大缓冲区
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
+# 系统级最大缓冲区 (32MB) - 避免过大导致 bufferbloat
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
 
-# TCP 自动调节范围
-net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
+# TCP 自动调节范围 (最大 32MB)
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 16384 33554432
 
 # 默认缓冲区
-net.core.rmem_default = 524288
-net.core.wmem_default = 524288
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
 
 ########################
 # 高并发优化
@@ -800,11 +795,10 @@ net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 
 ############################################################
-# 激进模式特点：
-# - fq_codel 队列：智能抗抖动、降低延迟
+# 优化模式特点：
+# - fq 队列：配合 BBR 实现精准 pacing，平滑发送
+# - 32MB 缓冲区：平衡吞吐量与延迟，防止缓冲区膨胀
 # - tcp_fastopen：减少握手时间
-# - 更大初始窗口：加速起速
-# - 更短超时时间：快速回收资源
 ############################################################
 EOF
 
@@ -836,12 +830,11 @@ EOF
     fi
 
     echo "========================================================="
-    ok "激进优化已完成（晚高峰/抗抖动模式）"
+    ok "激进优化已应用（已调整为更稳定的低抖动配置）"
     echo "特点："
-    echo "  - fq_codel 队列：智能抗缓冲膨胀、降低延迟抖动"
-    echo "  - initcwnd=32：更大初始窗口，测速秒起速"
-    echo "  - tcp_fastopen：减少握手延迟"
-    echo "  - 更短超时时间：快速回收连接资源"
+    echo "  - fq 队列：BBR 最佳搭档，减少发包抖动"
+    echo "  - 缓冲区 32MB：防止 bufferbloat 导致的延迟不稳"
+    echo "  - initcwnd=32：保持快速起速特性"
     echo "========================================================="
 }
 
