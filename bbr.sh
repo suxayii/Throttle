@@ -969,6 +969,881 @@ EOF
 }
 
 # ---------------------------------------------------------
+# 平衡网络优化 (net-tune.sh)
+# ---------------------------------------------------------
+do_net_tune_balanced() {
+    echo "▶ 正在生成平衡网络优化脚本 (/root/net-tune.sh)..."
+    cat > /root/net-tune.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SYSCTL_FILE="/etc/sysctl.d/99-network-tuning.conf"
+BACKUP_DIR="/root/sysctl-backups"
+mkdir -p "$BACKUP_DIR"
+
+apply_tuning() {
+  local ts
+  ts=$(date +%F_%H%M%S)
+
+  # 备份当前内核参数快照
+  sysctl -a 2>/dev/null > "${BACKUP_DIR}/sysctl-all-${ts}.bak" || true
+  # 备份旧配置文件（如果存在）
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    cp -a "$SYSCTL_FILE" "${BACKUP_DIR}/99-network-tuning.conf.${ts}.bak"
+  fi
+
+  cat > "$SYSCTL_FILE" <<'CONF'
+# ===== Network tuning (balanced for 4C/4G, proxy/web workloads) =====
+# 网卡输入队列上限（先用平衡值，避免250000过激）
+net.core.netdev_max_backlog = 65536
+
+# TCP Fast Open（客户端+服务端）
+net.ipv4.tcp_fastopen = 3
+
+# MTU黑洞探测（公网复杂路径建议开启）
+net.ipv4.tcp_mtu_probing = 1
+
+# Socket缓冲区上限（64MB）
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+
+# TCP 自动调优范围（先32MB上限，稳妥）
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+
+# BBR + fq（现代内核常用组合）
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+CONF
+
+  sysctl --system >/dev/null
+  echo "✅ 已应用优化配置：$SYSCTL_FILE"
+  echo "✅ 备份目录：$BACKUP_DIR"
+  echo
+  echo "当前关键参数："
+  sysctl net.core.netdev_max_backlog \
+         net.ipv4.tcp_fastopen \
+         net.ipv4.tcp_mtu_probing \
+         net.core.rmem_max \
+         net.core.wmem_max \
+         net.ipv4.tcp_rmem \
+         net.ipv4.tcp_wmem \
+         net.core.default_qdisc \
+         net.ipv4.tcp_congestion_control
+}
+
+rollback_tuning() {
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    rm -f "$SYSCTL_FILE"
+    sysctl --system >/dev/null
+    echo "✅ 已回滚：删除 $SYSCTL_FILE 并重新加载 sysctl"
+  else
+    echo "ℹ️ 未发现 $SYSCTL_FILE，无需回滚"
+  fi
+}
+
+status_tuning() {
+  echo "=== 当前关键参数 ==="
+  sysctl net.core.netdev_max_backlog \
+         net.ipv4.tcp_fastopen \
+         net.ipv4.tcp_mtu_probing \
+         net.core.rmem_max \
+         net.core.wmem_max \
+         net.ipv4.tcp_rmem \
+         net.ipv4.tcp_wmem \
+         net.core.default_qdisc \
+         net.ipv4.tcp_congestion_control || true
+  echo
+  echo "=== 配置文件 ==="
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    cat "$SYSCTL_FILE"
+  else
+    echo "未找到 $SYSCTL_FILE"
+  fi
+}
+
+case "${1:-apply}" in
+  apply) apply_tuning ;;
+  rollback) rollback_tuning ;;
+  status) status_tuning ;;
+  *)
+    echo "用法: $0 [apply|rollback|status]"
+    exit 1
+    ;;
+esac
+EOF
+
+    chmod +x /root/net-tune.sh
+    ok "脚本生成成功：/root/net-tune.sh"
+    echo "▶ 正在应用平衡优化..."
+    /root/net-tune.sh apply
+}
+
+# ---------------------------------------------------------
+# 激进网络优化 (net-tune-aggressive.sh)
+# ---------------------------------------------------------
+do_net_tune_standalone_aggressive() {
+    echo "▶ 正在生成激进网络优化脚本 (/root/net-tune-aggressive.sh)..."
+    cat > /root/net-tune-aggressive.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SYSCTL_FILE="/etc/sysctl.d/99-network-tuning-aggressive.conf"
+BACKUP_DIR="/root/sysctl-backups"
+mkdir -p "$BACKUP_DIR"
+
+apply_tuning() {
+  local ts
+  ts=$(date +%F_%H%M%S)
+
+  # 备份当前参数快照
+  sysctl -a 2>/dev/null > "${BACKUP_DIR}/sysctl-all-${ts}.bak" || true
+  # 备份旧配置
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    cp -a "$SYSCTL_FILE" "${BACKUP_DIR}/99-network-tuning-aggressive.conf.${ts}.bak"
+  fi
+
+  cat > "$SYSCTL_FILE" <<'CONF'
+# ===== Network tuning (AGGRESSIVE) =====
+# 适用：高并发/高PPS/大流量网关、代理、下载、视频等场景
+# 注意：更高内存占用与更高softirq压力
+
+# 网卡输入队列（激进）
+net.core.netdev_max_backlog = 250000
+
+# 套接字缓冲区上限（128MB）
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+
+# TCP 自动调优范围（上限 64MB）
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+
+# 连接队列相关（避免高并发下listen队列溢出）
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 262144
+
+# TIME_WAIT 与端口范围（提升并发连接复用能力）
+net.ipv4.ip_local_port_range = 10240 65535
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_tw_reuse = 1
+
+# SYN 防护（抗突发半连接）
+net.ipv4.tcp_syncookies = 1
+
+# TCP Fast Open / MTU probing
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+
+# 队列调度与拥塞控制
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# 可选：提高UDP最小缓冲（对部分UDP代理/隧道有帮助）
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+CONF
+
+  sysctl --system >/dev/null
+  echo "✅ 已应用激进优化：$SYSCTL_FILE"
+  echo "✅ 备份目录：$BACKUP_DIR"
+  echo
+  echo "当前关键参数："
+  sysctl net.core.netdev_max_backlog \
+         net.core.rmem_max \
+         net.core.wmem_max \
+         net.ipv4.tcp_rmem \
+         net.ipv4.tcp_wmem \
+         net.core.somaxconn \
+         net.ipv4.tcp_max_syn_backlog \
+         net.ipv4.ip_local_port_range \
+         net.ipv4.tcp_fin_timeout \
+         net.ipv4.tcp_tw_reuse \
+         net.ipv4.tcp_syncookies \
+         net.ipv4.tcp_fastopen \
+         net.ipv4.tcp_mtu_probing \
+         net.core.default_qdisc \
+         net.ipv4.tcp_congestion_control
+}
+
+rollback_tuning() {
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    rm -f "$SYSCTL_FILE"
+    sysctl --system >/dev/null
+    echo "✅ 已回滚：删除 $SYSCTL_FILE 并重新加载 sysctl"
+  else
+    echo "ℹ️ 未发现 $SYSCTL_FILE，无需回滚"
+  fi
+}
+
+status_tuning() {
+  echo "=== 当前关键参数 ==="
+  sysctl net.core.netdev_max_backlog \
+         net.core.rmem_max \
+         net.core.wmem_max \
+         net.ipv4.tcp_rmem \
+         net.ipv4.tcp_wmem \
+         net.core.somaxconn \
+         net.ipv4.tcp_max_syn_backlog \
+         net.ipv4.ip_local_port_range \
+         net.ipv4.tcp_fin_timeout \
+         net.ipv4.tcp_tw_reuse \
+         net.ipv4.tcp_syncookies \
+         net.ipv4.tcp_fastopen \
+         net.ipv4.tcp_mtu_probing \
+         net.core.default_qdisc \
+         net.ipv4.tcp_congestion_control || true
+  echo
+  echo "=== 配置文件 ==="
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    cat "$SYSCTL_FILE"
+  else
+    echo "未找到 $SYSCTL_FILE"
+  fi
+}
+
+watch_metrics() {
+  echo "每2秒刷新一次，按 Ctrl+C 退出"
+  while true; do
+    clear
+    echo "===== $(date '+%F %T') ====="
+    echo "[softnet_stat 丢包列(第2列) 前5行]"
+    awk '{print NR ": " $2}' /proc/net/softnet_stat | head -n 5
+    echo
+    echo "[TCP摘要]"
+    ss -s || true
+    echo
+    echo "[内存摘要]"
+    free -h || true
+    sleep 2
+  done
+}
+
+case "${1:-apply}" in
+  apply) apply_tuning ;;
+  rollback) rollback_tuning ;;
+  status) status_tuning ;;
+  watch) watch_metrics ;;
+  *)
+    echo "用法: $0 [apply|rollback|status|watch]"
+    exit 1
+    ;;
+esac
+EOF
+
+    chmod +x /root/net-tune-aggressive.sh
+    ok "脚本生成成功：/root/net-tune-aggressive.sh"
+    echo "▶ 正在应用激进优化..."
+    /root/net-tune-aggressive.sh apply
+}
+
+# ---------------------------------------------------------
+# 激进且安全网络优化 (net-tune-aggressive-safe.sh)
+# ---------------------------------------------------------
+do_net_tune_standalone_aggressive_safe() {
+    echo "▶ 正在生成激进且安全网络优化脚本 (/root/net-tune-aggressive-safe.sh)..."
+    cat > /root/net-tune-aggressive-safe.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SYSCTL_FILE="/etc/sysctl.d/99-network-tuning-aggressive-safe.conf"
+BACKUP_DIR="/root/sysctl-backups"
+mkdir -p "$BACKUP_DIR"
+
+apply_tuning() {
+  local ts
+  ts=$(date +%F_%H%M%S)
+
+  # 备份当前参数快照
+  sysctl -a 2>/dev/null > "${BACKUP_DIR}/sysctl-all-${ts}.bak" || true
+  # 备份旧配置
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    cp -a "$SYSCTL_FILE" "${BACKUP_DIR}/99-network-tuning-aggressive-safe.conf.${ts}.bak"
+  fi
+
+  cat > "$SYSCTL_FILE" <<'CONF'
+# ===== Network tuning (AGGRESSIVE but SAFER) =====
+# 适用：4C4G~8C16G 代理/网关/高并发 Web 场景
+# 特点：比普通版更激进；比250000 backlog版本更稳
+
+# 1) 网卡输入队列：从 250000 下调到更稳的 131072
+net.core.netdev_max_backlog = 131072
+
+# 2) 连接队列上限
+net.core.somaxconn = 32768
+net.ipv4.tcp_max_syn_backlog = 131072
+
+# 3) 缓冲上限（保留高上限）
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+
+# 4) TCP 自动调优（给到 64MB 上限，兼顾内存）
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+
+# 5) 端口与连接回收
+net.ipv4.ip_local_port_range = 10240 65535
+net.ipv4.tcp_fin_timeout = 20
+net.ipv4.tcp_tw_reuse = 1
+
+# 6) 基础防护与链路优化
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+
+# 7) 拥塞控制
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# 8) UDP 最小缓冲（对 UDP 隧道/代理更友好）
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+CONF
+
+  sysctl --system >/dev/null
+  echo "✅ 已应用：$SYSCTL_FILE"
+  echo "✅ 备份目录：$BACKUP_DIR"
+  echo
+  sysctl net.core.netdev_max_backlog \
+         net.core.somaxconn \
+         net.ipv4.tcp_max_syn_backlog \
+         net.core.rmem_max \
+         net.core.wmem_max \
+         net.ipv4.tcp_rmem \
+         net.ipv4.tcp_wmem \
+         net.ipv4.ip_local_port_range \
+         net.ipv4.tcp_fin_timeout \
+         net.ipv4.tcp_tw_reuse \
+         net.ipv4.tcp_fastopen \
+         net.ipv4.tcp_mtu_probing \
+         net.core.default_qdisc \
+         net.ipv4.tcp_congestion_control
+}
+
+rollback_tuning() {
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    rm -f "$SYSCTL_FILE"
+    sysctl --system >/dev/null
+    echo "✅ 已回滚：删除 $SYSCTL_FILE 并重新加载 sysctl"
+  else
+    echo "ℹ️ 未发现 $SYSCTL_FILE，无需回滚"
+  fi
+}
+
+status_tuning() {
+  echo "=== 当前关键参数 ==="
+  sysctl net.core.netdev_max_backlog \
+         net.core.somaxconn \
+         net.ipv4.tcp_max_syn_backlog \
+         net.core.rmem_max \
+         net.core.wmem_max \
+         net.ipv4.tcp_rmem \
+         net.ipv4.tcp_wmem \
+         net.ipv4.ip_local_port_range \
+         net.ipv4.tcp_fin_timeout \
+         net.ipv4.tcp_tw_reuse \
+         net.ipv4.tcp_fastopen \
+         net.ipv4.tcp_mtu_probing \
+         net.core.default_qdisc \
+         net.ipv4.tcp_congestion_control || true
+  echo
+  echo "=== 配置文件 ==="
+  [[ -f "$SYSCTL_FILE" ]] && cat "$SYSCTL_FILE" || echo "未找到 $SYSCTL_FILE"
+}
+
+watch_metrics() {
+  echo "每2秒刷新，Ctrl+C退出"
+  while true; do
+    clear
+    echo "===== $(date '+%F %T') ====="
+    echo "[softnet_stat 丢包列(第2列) 前5行]"
+    awk '{print NR ": " $2}' /proc/net/softnet_stat | head -n 5
+    echo
+    echo "[溢出/重传相关]"
+    netstat -s 2>/dev/null | grep -Ei 'listen|overflow|drop|retrans' | head -n 20 || true
+    echo
+    echo "[连接概览]"
+    ss -s || true
+    echo
+    echo "[内存]"
+    free -h || true
+    sleep 2
+  done
+}
+
+case "${1:-apply}" in
+  apply) apply_tuning ;;
+  rollback) rollback_tuning ;;
+  status) status_tuning ;;
+  watch) watch_metrics ;;
+  *)
+    echo "用法: $0 [apply|rollback|status|watch]"
+    exit 1
+    ;;
+esac
+EOF
+
+    chmod +x /root/net-tune-aggressive-safe.sh
+    ok "脚本生成成功：/root/net-tune-aggressive-safe.sh"
+    echo "▶ 正在应用激进且安全优化..."
+    /root/net-tune-aggressive-safe.sh apply
+}
+
+# ---------------------------------------------------------
+# Xray/Hysteria2 专项优化 (net-tune-xray-hy2.sh)
+# ---------------------------------------------------------
+do_net_tune_xray_hy2() {
+    echo "▶ 正在生成 Xray/Hy2 专项优化脚本 (/root/net-tune-xray-hy2.sh)..."
+    cat > /root/net-tune-xray-hy2.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SYSCTL_FILE="/etc/sysctl.d/99-xray-hy2-tuning.conf"
+BACKUP_DIR="/root/sysctl-backups"
+mkdir -p "$BACKUP_DIR"
+
+apply_tuning() {
+  local ts
+  ts=$(date +%F_%H%M%S)
+
+  # 备份当前参数快照
+  sysctl -a 2>/dev/null > "${BACKUP_DIR}/sysctl-all-${ts}.bak" || true
+  # 备份旧专项配置
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    cp -a "$SYSCTL_FILE" "${BACKUP_DIR}/99-xray-hy2-tuning.conf.${ts}.bak"
+  fi
+
+  cat > "$SYSCTL_FILE" <<'CONF'
+# ===== Xray / Hysteria2 专项调优 =====
+# 目标：TCP/UDP混合代理场景（Xray + Hy2）
+# 建议系统：Linux 5.10+，更推荐 6.x
+
+###############
+# 核心队列与并发
+###############
+# 网卡收包队列（高并发但不过分激进）
+net.core.netdev_max_backlog = 131072
+# listen 队列上限
+net.core.somaxconn = 32768
+# SYN 半连接队列
+net.ipv4.tcp_max_syn_backlog = 131072
+
+#########################
+# Socket 缓冲区（TCP/UDP）
+#########################
+# 全局上限：128MB
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+# 默认值适度提高（防止小默认拖性能）
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+
+# TCP autotuning（上限64MB）
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+
+# UDP 最小缓冲（Hy2/QUIC 更友好）
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+
+#####################
+# TCP 连接行为优化
+#####################
+# Fast Open：客户端+服务端
+net.ipv4.tcp_fastopen = 3
+# MTU 黑洞探测（公网推荐）
+net.ipv4.tcp_mtu_probing = 1
+# 减少 TIME_WAIT 占用压力
+net.ipv4.tcp_fin_timeout = 20
+net.ipv4.tcp_tw_reuse = 1
+# 临时端口范围扩大（高并发出站更稳）
+net.ipv4.ip_local_port_range = 10240 65535
+# SYN cookies 防护
+net.ipv4.tcp_syncookies = 1
+
+########################
+# 拥塞控制（Xray TCP关键）
+########################
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+########################
+# 可选稳定性项（通常安全）
+########################
+# 避免队首阻塞导致的异常重试
+net.ipv4.tcp_slow_start_after_idle = 0
+CONF
+
+  sysctl --system >/dev/null
+
+  echo "✅ 已应用 Xray/Hy2 专项优化：$SYSCTL_FILE"
+  echo "✅ 备份目录：$BACKUP_DIR"
+  echo
+  echo "=== 当前关键参数 ==="
+  sysctl \
+    net.core.netdev_max_backlog \
+    net.core.somaxconn \
+    net.ipv4.tcp_max_syn_backlog \
+    net.core.rmem_max \
+    net.core.wmem_max \
+    net.core.rmem_default \
+    net.core.wmem_default \
+    net.ipv4.tcp_rmem \
+    net.ipv4.tcp_wmem \
+    net.ipv4.udp_rmem_min \
+    net.ipv4.udp_wmem_min \
+    net.ipv4.tcp_fastopen \
+    net.ipv4.tcp_mtu_probing \
+    net.ipv4.tcp_fin_timeout \
+    net.ipv4.tcp_tw_reuse \
+    net.ipv4.ip_local_port_range \
+    net.ipv4.tcp_syncookies \
+    net.core.default_qdisc \
+    net.ipv4.tcp_congestion_control \
+    net.ipv4.tcp_slow_start_after_idle
+}
+
+status_tuning() {
+  echo "=== 当前关键参数 ==="
+  sysctl \
+    net.core.netdev_max_backlog \
+    net.core.somaxconn \
+    net.ipv4.tcp_max_syn_backlog \
+    net.core.rmem_max \
+    net.core.wmem_max \
+    net.core.rmem_default \
+    net.core.wmem_default \
+    net.ipv4.tcp_rmem \
+    net.ipv4.tcp_wmem \
+    net.ipv4.udp_rmem_min \
+    net.ipv4.udp_wmem_min \
+    net.ipv4.tcp_fastopen \
+    net.ipv4.tcp_mtu_probing \
+    net.ipv4.tcp_fin_timeout \
+    net.ipv4.tcp_tw_reuse \
+    net.ipv4.ip_local_port_range \
+    net.ipv4.tcp_syncookies \
+    net.core.default_qdisc \
+    net.ipv4.tcp_congestion_control \
+    net.ipv4.tcp_slow_start_after_idle || true
+  echo
+  echo "=== 配置文件 ==="
+  [[ -f "$SYSCTL_FILE" ]] && cat "$SYSCTL_FILE" || echo "未找到 $SYSCTL_FILE"
+}
+
+watch_metrics() {
+  echo "每2秒刷新，Ctrl+C 退出"
+  while true; do
+    clear
+    echo "===== $(date '+%F %T') ====="
+    echo "[CPU softirq]"
+    grep -E '^(cpu|NET_RX|NET_TX)' /proc/softirqs || true
+    echo
+    echo "[softnet_stat 丢包列(第2列) 前8行]"
+    awk '{print NR ": " $2}' /proc/net/softnet_stat | head -n 8
+    echo
+    echo "[UDP/TCP 摘要]"
+    ss -s || true
+    echo
+    echo "[重传/溢出关键字]"
+    netstat -s 2>/dev/null | grep -Ei 'retrans|listen|overflow|drop|fail|prune' | head -n 30 || true
+    echo
+    echo "[内存]"
+    free -h || true
+    sleep 2
+  done
+}
+
+rollback_tuning() {
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    rm -f "$SYSCTL_FILE"
+    sysctl --system >/dev/null
+    echo "✅ 已回滚：删除 $SYSCTL_FILE 并重新加载 sysctl"
+  else
+    echo "ℹ️ 未发现 $SYSCTL_FILE，无需回滚"
+  fi
+}
+
+case "${1:-apply}" in
+  apply) apply_tuning ;;
+  status) status_tuning ;;
+  watch) watch_metrics ;;
+  rollback) rollback_tuning ;;
+  *)
+    echo "用法: $0 [apply|status|watch|rollback]"
+    exit 1
+    ;;
+esac
+EOF
+
+    chmod +x /root/net-tune-xray-hy2.sh
+    ok "脚本生成成功：/root/net-tune-xray-hy2.sh"
+    echo "▶ 正在应用 Xray/Hy2 专项优化..."
+    /root/net-tune-xray-hy2.sh apply
+}
+
+# ---------------------------------------------------------
+# 分级配置优化 (net-profile-tune.sh)
+# ---------------------------------------------------------
+do_net_profile_tune() {
+    echo "▶ 正在生成分级配置优化脚本 (/root/net-profile-tune.sh)..."
+    cat > /root/net-profile-tune.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROFILE="${2:-}"
+ACTION="${1:-}"
+SYSCTL_FILE="/etc/sysctl.d/99-net-profile-tuning.conf"
+BACKUP_DIR="/root/sysctl-backups"
+mkdir -p "$BACKUP_DIR"
+
+backup_now() {
+  local ts
+  ts=$(date +%F_%H%M%S)
+  sysctl -a 2>/dev/null > "${BACKUP_DIR}/sysctl-all-${ts}.bak" || true
+  [[ -f "$SYSCTL_FILE" ]] && cp -a "$SYSCTL_FILE" "${BACKUP_DIR}/99-net-profile-tuning.conf.${ts}.bak"
+}
+
+write_common_header() {
+  cat > "$SYSCTL_FILE" <<'CONF'
+# ===== Net Profile Tuning =====
+# Generated by /root/net-profile-tune.sh
+# Profiles:
+# - low_1c1g  : conservative for 1C/1G
+# - low_2c2g  : conservative for 2C/2G
+# - bw_1g     : high-throughput for 1G NIC
+# - bw_10g    : high-throughput for 10G NIC
+
+# ---- Common safe options ----
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 20
+net.ipv4.ip_local_port_range = 10240 65535
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+CONF
+}
+
+append_profile_low_1c1g() {
+  cat >> "$SYSCTL_FILE" <<'CONF'
+
+# ---- Profile: low_1c1g ----
+net.core.netdev_max_backlog = 8192
+net.core.somaxconn = 2048
+net.ipv4.tcp_max_syn_backlog = 8192
+
+net.core.rmem_default = 131072
+net.core.wmem_default = 131072
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+
+net.ipv4.tcp_rmem = 4096 87380 8388608
+net.ipv4.tcp_wmem = 4096 65536 8388608
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+net.ipv4.tcp_slow_start_after_idle = 0
+CONF
+}
+
+append_profile_low_2c2g() {
+  cat >> "$SYSCTL_FILE" <<'CONF'
+
+# ---- Profile: low_2c2g ----
+net.core.netdev_max_backlog = 16384
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 16384
+
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+
+net.ipv4.tcp_slow_start_after_idle = 0
+CONF
+}
+
+append_profile_bw_1g() {
+  cat >> "$SYSCTL_FILE" <<'CONF'
+
+# ---- Profile: bw_1g ----
+net.core.netdev_max_backlog = 32768
+net.core.somaxconn = 16384
+net.ipv4.tcp_max_syn_backlog = 65536
+
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+
+net.ipv4.tcp_slow_start_after_idle = 0
+CONF
+}
+
+append_profile_bw_10g() {
+  cat >> "$SYSCTL_FILE" <<'CONF'
+
+# ---- Profile: bw_10g ----
+net.core.netdev_max_backlog = 131072
+net.core.somaxconn = 32768
+net.ipv4.tcp_max_syn_backlog = 131072
+
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+
+net.ipv4.tcp_slow_start_after_idle = 0
+CONF
+}
+
+apply_profile() {
+  local p="$1"
+  backup_now
+  write_common_header
+  case "$p" in
+    low_1c1g) append_profile_low_1c1g ;;
+    low_2c2g) append_profile_low_2c2g ;;
+    bw_1g)    append_profile_bw_1g ;;
+    bw_10g)   append_profile_bw_10g ;;
+    *)
+      echo "❌ 未知 profile: $p"
+      echo "可用: low_1c1g | low_2c2g | bw_1g | bw_10g"
+      exit 1
+      ;;
+  esac
+
+  sysctl --system >/dev/null
+  echo "✅ 已应用 profile: $p"
+  echo "✅ 配置文件: $SYSCTL_FILE"
+  echo "✅ 备份目录: $BACKUP_DIR"
+  echo
+  status_now
+}
+
+status_now() {
+  sysctl \
+    net.core.netdev_max_backlog \
+    net.core.somaxconn \
+    net.ipv4.tcp_max_syn_backlog \
+    net.core.rmem_default \
+    net.core.wmem_default \
+    net.core.rmem_max \
+    net.core.wmem_max \
+    net.ipv4.tcp_rmem \
+    net.ipv4.tcp_wmem \
+    net.ipv4.udp_rmem_min \
+    net.ipv4.udp_wmem_min \
+    net.ipv4.tcp_fastopen \
+    net.ipv4.tcp_mtu_probing \
+    net.ipv4.tcp_fin_timeout \
+    net.ipv4.tcp_tw_reuse \
+    net.ipv4.ip_local_port_range \
+    net.core.default_qdisc \
+    net.ipv4.tcp_congestion_control \
+    net.ipv4.tcp_slow_start_after_idle || true
+  echo
+  echo "--- $SYSCTL_FILE ---"
+  [[ -f "$SYSCTL_FILE" ]] && cat "$SYSCTL_FILE" || echo "未找到配置文件"
+}
+
+rollback_now() {
+  if [[ -f "$SYSCTL_FILE" ]]; then
+    rm -f "$SYSCTL_FILE"
+    sysctl --system >/dev/null
+    echo "✅ 已回滚（删除 $SYSCTL_FILE 并重载）"
+  else
+    echo "ℹ️ 未发现 $SYSCTL_FILE，无需回滚"
+  fi
+}
+
+watch_now() {
+  echo "每2秒刷新，Ctrl+C退出"
+  while true; do
+    clear
+    echo "===== $(date '+%F %T') ====="
+    echo "[softnet_stat 丢包列(第2列) 前8行]"
+    awk '{print NR ": " $2}' /proc/net/softnet_stat | head -n 8
+    echo
+    echo "[ss -s]"
+    ss -s || true
+    echo
+    echo "[netstat关键统计]"
+    netstat -s 2>/dev/null | grep -Ei 'listen|overflow|drop|retrans' | head -n 30 || true
+    echo
+    echo "[内存]"
+    free -h || true
+    sleep 2
+  done
+}
+
+usage() {
+  cat <<USAGE
+用法:
+  $0 apply <profile>
+  $0 status
+  $0 rollback
+  $0 watch
+
+profile:
+  low_1c1g   低内存保守版（1C/1G）
+  low_2c2g   低内存保守版（2C/2G）
+  bw_1g      高带宽版（1G口）
+  bw_10g     高带宽版（10G口）
+USAGE
+}
+
+case "$ACTION" in
+  apply)    [[ -n "$PROFILE" ]] || { usage; exit 1; }; apply_profile "$PROFILE" ;;
+  status)   status_now ;;
+  rollback) rollback_now ;;
+  watch)    watch_now ;;
+  *)        usage; exit 1 ;;
+esac
+EOF
+
+    chmod +x /root/net-profile-tune.sh
+    ok "脚本生成成功：/root/net-profile-tune.sh"
+    
+    echo "========================================================="
+    echo "           分级配置优化 (Hardware Profile)"
+    echo "========================================================="
+    echo " 1. 低内存保守版 (1C/1G)"
+    echo " 2. 低内存保守版 (2C/2G)"
+    echo " 3. 高带宽版 (1G NIC)"
+    echo " 4. 高带宽版 (10G NIC)"
+    echo " 0. 返回主菜单"
+    echo "========================================================="
+    read -p "请选择硬件配置 [0-4]: " prof_choice
+    
+    case "$prof_choice" in
+        1) /root/net-profile-tune.sh apply low_1c1g ;;
+        2) /root/net-profile-tune.sh apply low_2c2g ;;
+        3) /root/net-profile-tune.sh apply bw_1g ;;
+        4) /root/net-profile-tune.sh apply bw_10g ;;
+        0) return ;;
+        *) echo "无效选择" ;;
+    esac
+}
+
+# ---------------------------------------------------------
 # BBRv3 支持检测
 # ---------------------------------------------------------
 do_bbr_detect() {
@@ -1150,6 +2025,11 @@ show_menu() {
     echo "10. 🌐 网络测试"
     echo "11. 🔍 BBR 版本检测"
     echo "12. ⬆️  升级内核（支持 BBR）"
+    echo "13. ⚖️  应用平衡优化 (net-tune.sh)"
+    echo "14. 🔥 应用激进优化 (net-tune-aggressive.sh)"
+    echo "15. 🛡️  应用激进且安全优化 (net-tune-aggressive-safe.sh)"
+    echo "16. ⚡ 应用 Xray/Hy2 专项优化 (net-tune-xray-hy2.sh)"
+    echo "17. 📱 应用分级配置优化 (net-profile-tune.sh)"
     echo " 0. 退出"
     echo "========================================================="
     read -p "请输入选项 [0-12]: " choice
@@ -1167,6 +2047,11 @@ show_menu() {
         10) do_network_test ;;
         11) do_bbr_detect ;;
         12) do_kernel_upgrade ;;
+        13) do_net_tune_balanced ;;
+        14) do_net_tune_standalone_aggressive ;;
+        15) do_net_tune_standalone_aggressive_safe ;;
+        16) do_net_tune_xray_hy2 ;;
+        17) do_net_profile_tune ;;
         0) exit 0 ;;
         *) echo "无效选项"; exit 1 ;;
     esac
@@ -1189,6 +2074,11 @@ if [[ $# -gt 0 ]]; then
         test|speedtest)       do_network_test ;;
         bbr|detect)           do_bbr_detect ;;
         kernel|upgrade)       do_kernel_upgrade ;;
+        balanced|tune)        do_net_tune_balanced ;;
+        aggressive-standalone) do_net_tune_standalone_aggressive ;;
+        aggressive-safe)      do_net_tune_standalone_aggressive_safe ;;
+        xray-hy2)             do_net_tune_xray_hy2 ;;
+        profile)              do_net_profile_tune ;;
         *)                    show_menu ;;
     esac
 else
