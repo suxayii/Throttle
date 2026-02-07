@@ -2015,43 +2015,39 @@ show_menu() {
     show_backup_info
     echo " 1. 预检查（不修改）"
     echo " 2. 应用标准优化配置"
-    echo " 3. 应用激进优化（晚高峰/抗抖动/快速起速）"
-    echo " 4. 应用流媒体/极速起飞优化（解决爬坡慢）"
-    echo " 5. 🔒 备份原始系统配置（永不覆盖）"
-    echo " 6. 还原到原始系统配置"
-    echo " 7. 还原最近一次配置备份"
-    echo " 8. 还原首次配置备份"
-    echo " 9. 查看当前状态"
-    echo "10. 🌐 网络测试"
-    echo "11. 🔍 BBR 版本检测"
-    echo "12. ⬆️  升级内核（支持 BBR）"
-    echo "13. ⚖️  应用平衡优化 (net-tune.sh)"
-    echo "14. 🔥 应用激进优化 (net-tune-aggressive.sh)"
-    echo "15. 🛡️  应用激进且安全优化 (net-tune-aggressive-safe.sh)"
-    echo "16. ⚡ 应用 Xray/Hy2 专项优化 (net-tune-xray-hy2.sh)"
-    echo "17. 📱 应用分级配置优化 (net-profile-tune.sh)"
+    echo " 3. 备份原始系统配置（永不覆盖）"
+    echo " 4. 还原到原始系统配置"
+    echo " 5. 还原最近一次配置备份"
+    echo " 6. 还原首次配置备份"
+    echo " 7. 查看当前状态"
+    echo " 8. 网络测试"
+    echo " 9. BBR 版本检测"
+    echo "10. 升级内核（支持 BBR）"
+    echo "11. 应用平衡优化 (net-tune.sh)"
+    echo "12. 应用激进优化 (net-tune-aggressive.sh)"
+    echo "13. 应用激进且安全优化 (net-tune-aggressive-safe.sh)"
+    echo "14. 应用 Xray/Hy2 专项优化 (net-tune-xray-hy2.sh)"
+    echo "15. 应用分级配置优化 (net-profile-tune.sh)"
     echo " 0. 退出"
     echo "========================================================="
-    read -p "请输入选项 [0-12]: " choice
+    read -p "请输入选项 [0-15]: " choice
 
     case "$choice" in
         1) do_precheck ;;
         2) do_optimize ;;
-        3) do_aggressive ;;
-        4) do_streaming ;;
-        5) do_pristine_backup ;;
-        6) do_restore_pristine ;;
-        7) do_restore_latest ;;
-        8) do_restore_original ;;
-        9) do_status ;;
-        10) do_network_test ;;
-        11) do_bbr_detect ;;
-        12) do_kernel_upgrade ;;
-        13) do_net_tune_balanced ;;
-        14) do_net_tune_standalone_aggressive ;;
-        15) do_net_tune_standalone_aggressive_safe ;;
-        16) do_net_tune_xray_hy2 ;;
-        17) do_net_profile_tune ;;
+        3) do_pristine_backup ;;
+        4) do_restore_pristine ;;
+        5) do_restore_latest ;;
+        6) do_restore_original ;;
+        7) do_status ;;
+        8) do_network_test ;;
+        9) do_bbr_detect ;;
+        10) do_kernel_upgrade ;;
+        11) do_net_tune_balanced ;;
+        12) do_net_tune_standalone_aggressive ;;
+        13) do_net_tune_standalone_aggressive_safe ;;
+        14) do_net_tune_xray_hy2 ;;
+        15) do_net_profile_tune ;;
         0) exit 0 ;;
         *) echo "无效选项"; exit 1 ;;
     esac
@@ -2064,8 +2060,6 @@ if [[ $# -gt 0 ]]; then
     case "$1" in
         precheck|check)       do_precheck ;;
         optimize)             do_optimize ;;
-        aggressive|fast)      do_aggressive ;;
-        streaming|fly)        do_streaming ;;
         pristine|backup)      do_pristine_backup ;;
         restore-pristine)     do_restore_pristine ;;
         restore|latest)       do_restore_latest ;;
