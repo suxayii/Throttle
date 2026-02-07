@@ -24,7 +24,7 @@ This project provides a set of efficient, easy-to-use Linux server network manag
 ## 🛠️ Core Tools
 
 ### 1. Net Tune Pro v3 (`install.sh`)
-**The most powerful all-in-one network optimization profile manager.** Integrates various preset optimization plans with atomic configuration and version protection.
+**Recommended! The most powerful all-in-one network optimization profile manager.** Integrates various preset optimization plans with atomic configuration and version protection.
 
 -   **Key Features**:
     -   **Multi-Profile Support**: Built-in Balanced, Aggressive, Xray/Hysteria2 dedicated, and Low-resource (1C1G/2C2G) profiles.
@@ -32,7 +32,14 @@ This project provides a set of efficient, easy-to-use Linux server network manag
     -   **Security Mechanism**: Features conflict detection, permanent pristine backup, and history snapshots for easy rollback to previous application points.
     -   **Real-time Monitoring**: Built-in real-time traffic and network statistics viewer.
 
-### 2. Port Throttle Tool (`Throttle.sh`)
+### 2. Net Tune Pro v2.1 (`bbr2.sh`)
+**Classic version of Net Tune Pro.** Provides stable network optimization plans, ideal as an alternative for specific kernel environments.
+
+-   **Key Features**:
+    -   Covers basic BBR enabling and system parameter tuning.
+    -   Supports various preset Profiles for different network scenarios.
+
+### 3. Port Throttle Tool (`Throttle.sh`)
 A precise port throttling tool based on `tc` and `iptables`, designed specifically for VPS bandwidth management.
 
 -   **Key Features**:
@@ -72,12 +79,17 @@ chmod +x *.sh
 
 ### Method 2: One-Click Command
 
-#### 1. Net Tune Pro v3 (All-in-one Optimization)
+#### 1. Net Tune Pro v3 (All-in-one Optimization - Recommended)
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/install.sh)
 ```
 
-#### 2. Port Throttling
+#### 2. Net Tune Pro v2.1 (Classic Optimization Plan)
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/bbr2.sh)
+```
+
+#### 3. Port Throttling
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/Throttle.sh)
 ```

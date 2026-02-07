@@ -24,7 +24,7 @@
 ## 🛠️ 核心工具
 
 ### 1. Net Tune Pro v3 (`install.sh`)
-**最强大的全功能网络优化方案管理器。** 整合了多种预设优化方案，支持原子化配置与版本保护。
+**推荐！最强大的全功能网络优化方案管理器。** 整合了多种预设优化方案，支持原子化配置与版本保护。
 
 -   **核心功能**：
     -   **多方案切换**：内置均衡型 (Balanced)、激进型 (Aggressive)、Xray/Hysteria2 专用方案、低配机器专用方案 (1C1G/2C2G) 等。
@@ -32,7 +32,14 @@
     -   **安全机制**：支持冲突检测、永久初始备份、历史快照记录，可随时回滚到上一个应用点。
     -   **实时监控**：内置实时流量与网络统计查看器。
 
-### 2. 端口限速工具 (`Throttle.sh`)
+### 2. Net Tune Pro v2.1 (`bbr2.sh`)
+**Net Tune Pro 的经典版本。** 提供稳定的网络优化方案，适合特定内核环境下的备选使用。
+
+-   **核心功能**：
+    -   内容涵盖基础的 BBR 开启及系统参数调优。
+    -   支持多种预设 Profile，适用于不同的网络场景。
+
+### 3. 端口限速工具 (`Throttle.sh`)
 基于 `tc` 和 `iptables` 的精准端口限速工具，专为 VPS 带宽管理设计。
 
 -   **核心功能**：
@@ -72,12 +79,17 @@ chmod +x *.sh
 
 ### 方式二：一键命令运行
 
-#### 1. Net Tune Pro v3 (全能优化方案)
+#### 1. Net Tune Pro v3 (全能优化方案 - 推荐)
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/install.sh)
 ```
 
-#### 2. 端口限速
+#### 2. Net Tune Pro v2.1 (经典优化方案)
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/bbr2.sh)
+```
+
+#### 3. 端口限速
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/Throttle.sh)
 ```
