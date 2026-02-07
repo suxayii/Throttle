@@ -5,14 +5,15 @@
 ![Last Commit](https://img.shields.io/github/last-commit/suxayii/Throttle?label=Last%20Commit)
 [🇨🇳 中文文档](README.md) | [🇺🇸 English](README_EN.md)
 
-本项目致力于提供一套高效、易用的 Linux 服务器网络管理与优化脚本，涵盖端口限速、BBR 内核优化、以及常用代理服务（GOST）的便捷部署。
+本项目提供了一套高效、易用的 Linux 服务器网络管理与优化工具集。涵盖了从端口限速、BBR 内核优化到全功能的网络方案管理（Net Tune Pro）以及代理服务部署，旨在提升服务器的网络性能与可管理性。
 
 ## 📖 目录
 
-- [包含的工具](#-包含的工具)
-  - [1. 端口限速工具 (Throttle.sh)](#1-端口限速工具-throttlesh)
-  - [2. BBR 网络优化脚本 (bbr.sh)](#2-bbr-网络优化脚本-bbrsh)
-  - [3. GOST 代理部署脚本 (gost-proxy.sh)](#3-gost-代理部署脚本-gost-proxysh)
+- [🛠️ 核心工具](#️-核心工具)
+  - [1. Net Tune Pro v3 (install.sh)](#1-net-tune-pro-v3-installsh)
+  - [2. 端口限速工具 (Throttle.sh)](#2-端口限速工具-throttlesh)
+  - [3. BBR 网络优化脚本 (bbr.sh)](#3-bbr-网络优化脚本-bbrsh)
+  - [4. GOST 代理部署脚本 (gost-proxy.sh)](#4-gost-代理部署脚本-gost-proxysh)
 - [🚀 快速开始](#-快速开始)
 - [📋 系统要求](#-系统要求)
 - [🤝 贡献与反馈](#-贡献与反馈)
@@ -20,41 +21,40 @@
 
 ---
 
-## 🛠️ 包含的工具
+## 🛠️ 核心工具
 
-### 1. 端口限速工具 (`Throttle.sh`)
-
-一个基于 `tc` (Traffic Control) 和 `iptables` 的精准端口限速工具，专为解决 VPS 流量滥用或带宽分配问题设计。
-
--   **核心功能**：
-    -   **智能识别网卡**：自动识别物理网卡 (eth/ens/enp)，排除 Docker、WARP 等虚拟接口。
-    -   **精准限速**：支持对特定 TCP/UDP 端口设置上传/下载速率限制（单位：MB/s）。
-    -   **可视化管理**：提供实时带宽计算（Mbps）、规则列表查看、流量统计。
-    -   **一键维护**：支持一键清空所有规则，自动保存配置以支持开机自启。
-
-### 2. BBR 网络优化脚本 (`bbr.sh`)
-
-全能型 Linux 网络优化助手，集成多种 BBR 算法与系统级参数调优，支持内核管理。
+### 1. Net Tune Pro v3 (`install.sh`)
+**最强大的全功能网络优化方案管理器。** 整合了多种预设优化方案，支持原子化配置与版本保护。
 
 -   **核心功能**：
-    -   **内核优化**：开启 BBR，优化 TCP 窗口、缓冲区大小（默认 32MB+），提升高延迟网络下的吞吐量。
-    -   **激进模式**：针对晚高峰和网络抖动的深度优化模式，采用 `fq_codel` 队列算法，配合 `initcwnd=32` 和 TCP Fast Open，显著降低延迟并加速连接建立。
-    -   **备份与还原**：支持一键备份当前配置，并未提供“原始系统配置”的永久备份功能，确保可随时无损还原。
-    -   **内核管理**：自动检测 BBR 版本，支持 Debian/Ubuntu/CentOS 系统一键升级到支持 BBR 的最新内核。
-    -   **智能辅助**：内置网络延迟/下载测速工具，Pre-check 预检查机制确保系统环境符合要求。
-    -   **便捷命令**：安装后可通过 `bb` 命令快速唤醒菜单。
+    -   **多方案切换**：内置均衡型 (Balanced)、激进型 (Aggressive)、Xray/Hysteria2 专用方案、低配机器专用方案 (1C1G/2C2G) 等。
+    -   **BBR v3 支持**：通过集成 Joey BBR 项目，支持一键安装/管理高性能的 BBR v3 内核。
+    -   **安全机制**：支持冲突检测、永久初始备份、历史快照记录，可随时回滚到上一个应用点。
+    -   **实时监控**：内置实时流量与网络统计查看器。
 
-### 3. GOST 代理部署脚本 (`gost-proxy.sh`)
-
-极简的 GOST 隧道/代理服务部署工具 (v2.0)。
+### 2. 端口限速工具 (`Throttle.sh`)
+基于 `tc` 和 `iptables` 的精准端口限速工具，专为 VPS 带宽管理设计。
 
 -   **核心功能**：
-    -   **多模式支持**：SOCKS5、HTTP、或 SOCKS5+HTTP 双协议共存。
-    -   **多节点管理**：支持添加多个代理节点，独立配置端口和认证信息。
-    -   **灵活控制**：支持暂停/恢复特定代理节点，不影响其他服务运行。
-    -   **安全认证**：支持设置用户名与密码认证。
-    -   **智能检测**：部署前自动检测端口冲突。
-    -   **服务守护**：自动创建 Systemd 服务配置，确保服务稳定运行。
+    -   **物理网卡识别**：自动定位 eth/ens/enp 接口，完美避开 Docker、WARP 等虚拟接口。
+    -   **精准双向限速**：支持针对特定 TCP/UDP 端口设置独立的上传下载速率（单位：MB/s）。
+    -   **可视化统计**：实时显示命中包数与流量统计，配置自动持久化。
+
+### 3. BBR 网络优化脚本 (`bbr.sh`)
+经典的 BBR 开启与系统内核管理工具。
+
+-   **核心功能**：
+    -   **内核管理**：支持一键升级至 BBR 适配内核（Debian/Ubuntu/CentOS）。
+    -   **激进模式**：针对高丢包网络优化的激进配置，配合 `fq_codel` 算法降低延迟。
+    -   **一键恢复**：内置预检查机制，确保操作前系统环境符合要求。
+
+### 4. GOST 代理部署脚本 (`gost-proxy.sh`)
+极简的 GOST 隧道/代理服务 (v2.0) 部署工具。
+
+-   **核心功能**：
+    -   **多协议支持**：轻松部署 SOCKS5、HTTP 及其混合协议。
+    -   **多节点管理**：支持同时运行多个独立代理节点，独立配置认证信息。
+    -   **自动守护**：自动配置 Systemd 服务，确保代理进程稳定在线。
 
 ---
 
@@ -62,32 +62,32 @@
 
 ### 方式一：克隆仓库运行（推荐）
 
-适合需要查看源码或批量管理脚本的用户。
-
 ```bash
 git clone https://github.com/suxayii/Throttle.git
 cd Throttle
 chmod +x *.sh
-# 运行对应脚本，例如：
-./Throttle.sh
+# 运行 Net Tune Pro v3 (推荐)
+./install.sh
 ```
 
 ### 方式二：一键命令运行
 
-直接通过网络加载并运行脚本。
+#### 1. Net Tune Pro v3 (全能优化方案)
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/install.sh)
+```
 
-#### 1. 端口限速
+#### 2. 端口限速
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/Throttle.sh)
 ```
 
-#### 2. BBR 网络优化
+#### 3. BBR 基础优化
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/bbr.sh)
 ```
-> 安装后可直接输入 `bb` 命令管理。
 
-#### 3. GOST 代理部署
+#### 4. GOST 代理部署
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
 ```
@@ -96,13 +96,13 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 
 ## 📋 系统要求
 
--   **操作系统**: 建议使用 Debian 10+, Ubuntu 20.04+, CentOS 7+ 等主流 Linux 发行版。
--   **运行权限**: 脚本涉及网络接口与内核参数修改，必须以 `root` 用户运行。
--   **基础依赖**: 脚本会自动检查并尝试安装 `curl`, `wget`, `iptables`, `iproute2`, `tar` 等基础工具。
+-   **操作系统**: Debian 10+, Ubuntu 20.04+, CentOS 7+。
+-   **运行权限**: 必须以 `root` 用户运行。
+-   **基础依赖**: 脚本会自动安装 `curl`, `wget`, `iptables`, `iproute2` 等基础工具。
 
 ## 🤝 贡献与反馈
 
-欢迎提交 Issue 反馈 Bug 或建议，也欢迎提交 Pull Request 改进代码。
+欢迎提交 Issue 或 Pull Request 来共同完善本项目。
 
 ## 📄 许可证
 
