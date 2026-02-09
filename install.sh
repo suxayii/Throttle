@@ -213,6 +213,26 @@ net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 CONF
 }
+profile_vps_max(){ cat <<'CONF'
+# ---- 方案：VPS 极致带宽版（虚拟网卡） ----
+# 针对虚拟化环境优化，最大化带宽利用率
+net.core.netdev_max_backlog = 250000
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 262144
+net.core.rmem_default = 524288
+net.core.wmem_default = 524288
+net.core.rmem_max = 268435456
+net.core.wmem_max = 268435456
+net.ipv4.tcp_rmem = 4096 131072 134217728
+net.ipv4.tcp_wmem = 4096 131072 134217728
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+CONF
+}
 
 emit_profile(){
   case "$1" in
@@ -224,12 +244,14 @@ emit_profile(){
     low_2c2g) profile_low_2c2g ;;
     bw_1g) profile_bw_1g ;;
     bw_10g) profile_bw_10g ;;
+    vps_max) profile_vps_max ;;
     *) return 1 ;;
   esac
 }
 
 # ===================== 校验/检查 =====================
 extract_max_from_triplet(){ awk '{print $3}' <<<"$1"; }
+escape_regex() { sed -e 's/[][(){}.^$*+?|\/]/\\&/g' <<<"$1"; }
 
 validate_profile_semantics(){
   local tmp="$1"
@@ -264,7 +286,11 @@ precheck(){
     info "默认网卡：$nic"
     if [[ -r "/sys/class/net/$nic/speed" ]]; then
       speed="$(cat "/sys/class/net/$nic/speed" 2>/dev/null || echo unknown)"
-      info "网卡速率（Mbps）：$speed"
+      if [[ "$speed" == "-1" ]]; then
+        info "网卡速率：虚拟网卡（无物理链路速度）"
+      else
+        info "网卡速率（Mbps）：$speed"
+      fi
     fi
   fi
 
@@ -299,8 +325,56 @@ conflict_check(){
     ' "${files[@]}" | sort
   )"
 
-  if [[ -z "$out" ]]; then ok "未发现重复键冲突"; else warn "发现重复键："; echo "$out"; fi
+  if [[ -z "$out" ]]; then
+    ok "未发现重复键冲突"
+  else
+    warn "发现重复键："
+    echo "$out"
+    echo
+    read -rp "是否尝试自动修复（注释掉非管理文件中的冗余项）？[y/N]: " yn
+    if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
+      resolve_conflicts "$out"
+    fi
+  fi
   line
+}
+
+resolve_conflicts(){
+  local conflict_out="$1"
+  [[ -z "$conflict_out" ]] && return 0
+
+  local hdir
+  hdir="$(save_last_and_history_snapshot)"
+  info "修复前快照：$hdir"
+
+  info "正在准备修复冲突..."
+  local key file_list f
+  while IFS= read -r row; do
+    [[ -z "$row" ]] && continue
+    key="${row%% => *}"
+    file_list="${row#* => }"
+    
+    IFS=',' read -ra file_array <<< "$file_list"
+    for f in "${file_array[@]}"; do
+      # 排除脚本管理的文件
+      if [[ "$f" == "$ACTIVE_FILE" || "$f" == "$BBR_SYSCTL_FILE" ]]; then
+        continue
+      fi
+      
+      # 全量转义正则特殊字符
+      local escaped_key
+      escaped_key="$(escape_regex "$key")"
+
+      if grep -qiE "^[[:space:]]*${escaped_key}[[:space:]]*=" "$f"; then
+        if ! grep -q "commented by net-tune-pro repair" "$f"; then
+          info "在 $f 中注释掉冲突键：$key"
+          sed -i -E "s/^([[:space:]]*${escaped_key}[[:space:]]*=.*)$/# \1 # commented by net-tune-pro repair/" "$f"
+        fi
+      fi
+    done
+  done <<< "$conflict_out"
+  
+  ok "自动修复尝试完成。建议再次运行冲突检测。"
 }
 
 # ===================== 快照/回滚/永久基线 =====================
@@ -327,6 +401,28 @@ save_last_and_history_snapshot(){
   sysctl -a 2>/dev/null > "$LAST_APPLY_DIR/runtime-sysctl-all.txt" || true
   sysctl -a 2>/dev/null > "$hdir/runtime-sysctl-all.txt" || true
   echo "$hdir"
+}
+
+clean_old_snapshots(){
+  local keep_count="${1:-20}"
+  local snapshots count to_delete
+  snapshots=($(ls -1d "${HISTORY_DIR}/"* 2>/dev/null | sort))
+  count=${#snapshots[@]}
+  
+  if (( count <= keep_count )); then
+    info "当前快照数量：$count（保留阈值：$keep_count），无需清理"
+    return 0
+  fi
+  
+  to_delete=$((count - keep_count))
+  info "将清理 $to_delete 个旧快照，保留最近 $keep_count 个"
+  
+  for ((i=0; i<to_delete; i++)); do
+    rm -rf "${snapshots[$i]}"
+    info "已删除：${snapshots[$i]}"
+  done
+  
+  ok "清理完成，当前剩余：$keep_count 个快照"
 }
 
 rollback_last_apply_point(){
@@ -682,6 +778,7 @@ watch_metrics(){
 
 # ===================== 菜单 =====================
 choose_profile_menu(){
+  local p p_name
   while true; do
     clear
     echo -e "${BOLD}【选择并应用网络优化方案】${NC}"
@@ -694,9 +791,10 @@ choose_profile_menu(){
     echo "6) 低内存保守版（2C/2G）"
     echo "7) 高带宽版（1G口）"
     echo "8) 高带宽版（10G口）"
+    echo "9) VPS 极致带宽版（虚拟网卡）"
     echo "0) 返回"
     line
-    read -rp "请输入选项 [0-8]: " c
+    read -rp "请输入选项 [0-9]: " c
 
     case "$c" in
       1) p="balanced"; p_name="平衡版（通用推荐）" ;;
@@ -707,6 +805,7 @@ choose_profile_menu(){
       6) p="low_2c2g"; p_name="低内存保守版（2C/2G）" ;;
       7) p="bw_1g"; p_name="高带宽版（1G口）" ;;
       8) p="bw_10g"; p_name="高带宽版（10G口）" ;;
+      9) p="vps_max"; p_name="VPS 极致带宽版（虚拟网卡）" ;;
       0) return ;;
       *) warn "无效输入"; sleep 1; continue ;;
     esac
@@ -774,6 +873,7 @@ main_menu(){
     echo "8) 创建永久初始备份（仅首次）"
     echo "9) 回滚到永久初始配置（管理文件范围）"
     echo "10) 查看历史快照列表"
+    echo "11) 清理旧快照（保留最近20个）"
     echo "0) 退出"
     line
     read -rp "请输入选项: " ch
@@ -792,6 +892,7 @@ main_menu(){
         pause
         ;;
       10) ls -1 "$HISTORY_DIR" 2>/dev/null | sort || true; pause ;;
+      11) clean_old_snapshots 20; pause ;;
       0) ok "已退出"; exit 0 ;;
       *) warn "无效输入"; sleep 1 ;;
     esac

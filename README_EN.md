@@ -27,19 +27,26 @@ This project provides a set of efficient, easy-to-use Linux server network manag
 **Recommended! The most powerful all-in-one network optimization profile manager.** Integrates various preset optimization plans with atomic configuration and version protection.
 
 -   **Key Features**:
-    -   **Multi-Profile Support**: Built-in Balanced, Aggressive, Xray/Hysteria2 dedicated, and Low-resource (1C1G/2C2G) profiles.
+    -   **9 Optimization Profiles**:
+        | Profile | Use Case |
+        |---------|----------|
+        | Balanced | General purpose (recommended) |
+        | Aggressive | High concurrency / High PPS |
+        | Aggressive Safe | Recommended aggressive config |
+        | Xray/Hy2 Dedicated | Proxy server optimization |
+        | Low Memory (1C/1G) | Small memory VPS |
+        | Low Memory (2C/2G) | Medium config VPS |
+        | High Bandwidth (1G) | Gigabit physical NIC |
+        | High Bandwidth (10G) | 10 Gigabit physical NIC |
+        | **VPS Max Bandwidth** | Virtual NIC max throughput |
     -   **BBR v3 Support**: Integrated Joey BBR project for one-click installation and management of high-performance BBR v3 kernels.
-    -   **Security Mechanism**: Features conflict detection, permanent pristine backup, and history snapshots for easy rollback to previous application points.
+    -   **Queue Algorithm Management**: Supports FQ, FQ_CODEL, FQ_PIE, CAKE and more queue algorithms.
+    -   **Security Mechanism**: Features conflict detection, permanent pristine backup, and history snapshots for easy rollback.
     -   **Real-time Monitoring**: Built-in real-time traffic and network statistics viewer.
+    -   **Smart Detection**: Automatically identifies virtual NICs and provides friendly prompts.
+    -   **Snapshot Cleanup**: Supports automatic cleanup of old snapshots, keeping the latest 20.
 
-### 2. Net Tune Pro v2.1 (`bbr2.sh`)
-**Classic version of Net Tune Pro.** Provides stable network optimization plans, ideal as an alternative for specific kernel environments.
-
--   **Key Features**:
-    -   Covers basic BBR enabling and system parameter tuning.
-    -   Supports various preset Profiles for different network scenarios.
-
-### 3. Port Throttle Tool (`Throttle.sh`)
+### 2. Port Throttle Tool (`Throttle.sh`)
 A precise port throttling tool based on `tc` and `iptables`, designed specifically for VPS bandwidth management.
 
 -   **Key Features**:
@@ -84,12 +91,7 @@ chmod +x *.sh
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/install.sh)
 ```
 
-#### 2. Net Tune Pro v2.1 (Classic Optimization Plan)
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/bbr2.sh)
-```
-
-#### 3. Port Throttling
+#### 2. Port Throttling
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/Throttle.sh)
 ```
@@ -108,9 +110,9 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 
 ## 📋 System Requirements
 
--   **OS**: Debian 10+, Ubuntu 20.04+, CentOS 7+.
--   **Permissions**: Must be run as `root`.
--   **Dependencies**: Automatically installs base tools like `curl`, `wget`, `iptables`, `iproute2`.
+-   **OS**: Debian 10+, Ubuntu 20.04+, CentOS 7+
+-   **Permissions**: Must be run as `root`
+-   **Dependencies**: Automatically installs base tools like `curl`, `wget`, `iptables`, `iproute2`
 
 ## 🤝 Contributing
 

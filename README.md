@@ -27,19 +27,26 @@
 **推荐！最强大的全功能网络优化方案管理器。** 整合了多种预设优化方案，支持原子化配置与版本保护。
 
 -   **核心功能**：
-    -   **多方案切换**：内置均衡型 (Balanced)、激进型 (Aggressive)、Xray/Hysteria2 专用方案、低配机器专用方案 (1C1G/2C2G) 等。
+    -   **9 种优化方案**：
+        | 方案 | 适用场景 |
+        |------|----------|
+        | 平衡版 | 通用推荐 |
+        | 激进版 | 高并发/高 PPS |
+        | 激进稳妥版 | 推荐的激进配置 |
+        | Xray/Hy2 专项版 | 代理服务器优化 |
+        | 低内存版 (1C/1G) | 小内存 VPS |
+        | 低内存版 (2C/2G) | 中等配置 VPS |
+        | 高带宽版 (1G口) | 千兆物理网卡 |
+        | 高带宽版 (10G口) | 万兆物理网卡 |
+        | **VPS 极致带宽版** | 虚拟网卡最大化吞吐 |
     -   **BBR v3 支持**：通过集成 Joey BBR 项目，支持一键安装/管理高性能的 BBR v3 内核。
-    -   **安全机制**：支持冲突检测、永久初始备份、历史快照记录，可随时回滚到上一个应用点。
+    -   **队列算法管理**：支持 FQ、FQ_CODEL、FQ_PIE、CAKE 等多种队列算法。
+    -   **安全机制**：支持冲突检测、永久初始备份、历史快照记录，可随时回滚。
     -   **实时监控**：内置实时流量与网络统计查看器。
+    -   **智能检测**：自动识别虚拟网卡并提供友好提示。
+    -   **快照清理**：支持自动清理旧快照，保留最近 20 个。
 
-### 2. Net Tune Pro v2.1 (`bbr2.sh`)
-**Net Tune Pro 的经典版本。** 提供稳定的网络优化方案，适合特定内核环境下的备选使用。
-
--   **核心功能**：
-    -   内容涵盖基础的 BBR 开启及系统参数调优。
-    -   支持多种预设 Profile，适用于不同的网络场景。
-
-### 3. 端口限速工具 (`Throttle.sh`)
+### 2. 端口限速工具 (`Throttle.sh`)
 基于 `tc` 和 `iptables` 的精准端口限速工具，专为 VPS 带宽管理设计。
 
 -   **核心功能**：
@@ -84,12 +91,7 @@ chmod +x *.sh
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/install.sh)
 ```
 
-#### 2. Net Tune Pro v2.1 (经典优化方案)
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/bbr2.sh)
-```
-
-#### 3. 端口限速
+#### 2. 端口限速
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/Throttle.sh)
 ```
@@ -108,9 +110,9 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 
 ## 📋 系统要求
 
--   **操作系统**: Debian 10+, Ubuntu 20.04+, CentOS 7+。
--   **运行权限**: 必须以 `root` 用户运行。
--   **基础依赖**: 脚本会自动安装 `curl`, `wget`, `iptables`, `iproute2` 等基础工具。
+-   **操作系统**: Debian 10+, Ubuntu 20.04+, CentOS 7+
+-   **运行权限**: 必须以 `root` 用户运行
+-   **基础依赖**: 脚本会自动安装 `curl`, `wget`, `iptables`, `iproute2` 等基础工具
 
 ## 🤝 贡献与反馈
 
