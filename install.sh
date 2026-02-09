@@ -280,17 +280,72 @@ precheck(){
     warn "内核未报告 BBR，可继续但 bbr 可能不可用"
   fi
 
-  local nic speed
+  local nic speed driver ethtool_speed bw_hint
   nic="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
   if [[ -n "${nic:-}" ]]; then
     info "默认网卡：$nic"
+    
+    # 获取驱动类型
+    driver=""
+    if [[ -r "/sys/class/net/$nic/device/driver" ]]; then
+      driver="$(basename "$(readlink -f "/sys/class/net/$nic/device/driver")" 2>/dev/null || true)"
+    elif [[ -r "/sys/class/net/$nic/device/uevent" ]]; then
+      driver="$(awk -F= '/^DRIVER=/{print $2}' "/sys/class/net/$nic/device/uevent" 2>/dev/null || true)"
+    fi
+    
+    # 尝试从 /sys 读取速度
+    speed=""
     if [[ -r "/sys/class/net/$nic/speed" ]]; then
-      speed="$(cat "/sys/class/net/$nic/speed" 2>/dev/null || echo unknown)"
-      if [[ "$speed" == "-1" ]]; then
-        info "网卡速率：虚拟网卡（无物理链路速度）"
-      else
-        info "网卡速率（Mbps）：$speed"
+      speed="$(cat "/sys/class/net/$nic/speed" 2>/dev/null || true)"
+    fi
+    
+    # 如果 /sys 返回 -1，尝试 ethtool
+    ethtool_speed=""
+    if [[ "$speed" == "-1" || -z "$speed" ]] && cmd_exists ethtool; then
+      ethtool_speed="$(ethtool "$nic" 2>/dev/null | awk '/Speed:/ {print $2}' || true)"
+      if [[ -n "$ethtool_speed" && "$ethtool_speed" != "Unknown!" ]]; then
+        speed="$ethtool_speed"
       fi
+    fi
+    
+    # 根据驱动类型推断带宽
+    bw_hint=""
+    case "${driver:-unknown}" in
+      virtio_net|virtio-pci)
+        bw_hint="10Gbps+（KVM/QEMU 虚拟化，实际取决于主机商限制）"
+        ;;
+      xen_netfront)
+        bw_hint="取决于实例类型（Xen/AWS EC2 旧实例）"
+        ;;
+      ena)
+        bw_hint="最高 100Gbps（AWS ENA 增强网络）"
+        ;;
+      hv_netvsc)
+        bw_hint="取决于实例类型（Hyper-V/Azure）"
+        ;;
+      vmxnet3)
+        bw_hint="10Gbps（VMware 虚拟化）"
+        ;;
+      veth)
+        bw_hint="容器网络（Docker/LXC），带宽由主机决定"
+        ;;
+      *)
+        bw_hint=""
+        ;;
+    esac
+    
+    # 输出检测结果
+    if [[ -n "$driver" ]]; then
+      info "网卡驱动：$driver"
+    fi
+    
+    if [[ -n "$speed" && "$speed" != "-1" && "$speed" != "Unknown!" ]]; then
+      info "网卡速率：$speed"
+    elif [[ -n "$bw_hint" ]]; then
+      info "推测带宽上限：$bw_hint"
+      echo -e "  ${YELLOW}💡 建议：选择「VPS 极致带宽版（虚拟网卡）」方案以最大化利用带宽${NC}"
+    else
+      info "网卡速率：虚拟网卡（无法检测物理链路速度）"
     fi
   fi
 
