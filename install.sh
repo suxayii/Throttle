@@ -273,13 +273,83 @@ precheck(){
   line
   check_base_deps || return 1
 
-  info "内核版本：$(uname -r || true)"
-  if [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]] && grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
-    ok "内核报告支持 BBR"
+  # ===== 内核与 BBR 状态 =====
+  local kernel_ver bbr_available current_cc current_qdisc bbr_version
+  kernel_ver="$(uname -r || true)"
+  info "内核版本：$kernel_ver"
+  
+  # 检查 BBR 可用性
+  bbr_available="no"
+  if [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]]; then
+    local available_cc
+    available_cc="$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || true)"
+    info "可用拥塞控制：$available_cc"
+    if echo "$available_cc" | grep -qw bbr; then
+      bbr_available="yes"
+      ok "内核支持 BBR"
+    else
+      warn "内核未报告 BBR 支持"
+    fi
+  fi
+  
+  # 当前拥塞控制状态
+  current_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+  current_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
+  info "当前拥塞控制：$current_cc"
+  info "当前队列算法：$current_qdisc"
+  
+  # BBR 模块版本检测
+  if [[ "$current_cc" == "bbr" ]]; then
+    ok "BBR 已启用"
+    bbr_version="$(modinfo tcp_bbr 2>/dev/null | awk '/^version:/ {print $2}' || true)"
+    if [[ -n "$bbr_version" ]]; then
+      info "BBR 模块版本：$bbr_version"
+    fi
   else
-    warn "内核未报告 BBR，可继续但 bbr 可能不可用"
+    warn "BBR 未启用（当前：$current_cc）"
   fi
 
+  # ===== 虚拟化类型检测 =====
+  local virt_type
+  virt_type=""
+  if cmd_exists systemd-detect-virt; then
+    virt_type="$(systemd-detect-virt 2>/dev/null || true)"
+  elif [[ -r /sys/hypervisor/type ]]; then
+    virt_type="$(cat /sys/hypervisor/type 2>/dev/null || true)"
+  elif grep -qi "docker\|lxc" /proc/1/cgroup 2>/dev/null; then
+    virt_type="container"
+  fi
+  
+  if [[ -n "$virt_type" && "$virt_type" != "none" ]]; then
+    case "$virt_type" in
+      kvm)       info "虚拟化类型：KVM（支持自定义内核）" ;;
+      qemu)      info "虚拟化类型：QEMU（支持自定义内核）" ;;
+      xen)       info "虚拟化类型：Xen（支持自定义内核）" ;;
+      vmware)    info "虚拟化类型：VMware（支持自定义内核）" ;;
+      microsoft) info "虚拟化类型：Hyper-V（支持自定义内核）" ;;
+      openvz)    warn "虚拟化类型：OpenVZ（⚠️ 无法更换内核）" ;;
+      lxc|lxc-libvirt) warn "虚拟化类型：LXC 容器（⚠️ 无法更换内核）" ;;
+      container|docker) warn "虚拟化类型：容器环境（⚠️ 无法更换内核）" ;;
+      *) info "虚拟化类型：$virt_type" ;;
+    esac
+  else
+    info "虚拟化类型：物理机或未检测到"
+  fi
+
+  # ===== CPU 性能检测 =====
+  local cpu_model cpu_cores aes_ni
+  cpu_model="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo unknown)"
+  cpu_cores="$(nproc 2>/dev/null || echo 1)"
+  info "CPU：$cpu_model（${cpu_cores}核）"
+  
+  # AES-NI 指令集检测（加密性能关键）
+  if grep -qw aes /proc/cpuinfo 2>/dev/null; then
+    ok "AES-NI：已支持（加密性能优秀）"
+  else
+    warn "AES-NI：未检测到（加密性能可能较低，建议使用 ChaCha20）"
+  fi
+
+  # ===== 网卡检测 =====
   local nic speed driver ethtool_speed bw_hint
   nic="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
   if [[ -n "${nic:-}" ]]; then
@@ -340,7 +410,7 @@ precheck(){
     fi
     
     if [[ -n "$speed" && "$speed" != "-1" && "$speed" != "Unknown!" ]]; then
-      info "网卡速率：$speed"
+      info "网卡速率：${speed}Mbps"
     elif [[ -n "$bw_hint" ]]; then
       info "推测带宽上限：$bw_hint"
       echo -e "  ${YELLOW}💡 建议：选择「VPS 极致带宽版（虚拟网卡）」方案以最大化利用带宽${NC}"
@@ -349,6 +419,35 @@ precheck(){
     fi
   fi
 
+  # ===== UDP 端口检测 =====
+  line
+  info "正在检测 UDP 连通性..."
+  local udp_test_result
+  # 检查是否有 UDP 相关的 iptables 规则阻止
+  if cmd_exists iptables; then
+    local udp_drop_rules
+    udp_drop_rules="$(iptables -L -n 2>/dev/null | grep -i "udp.*drop\|drop.*udp" | head -3 || true)"
+    if [[ -n "$udp_drop_rules" ]]; then
+      warn "检测到 UDP 丢弃规则（可能影响 Hysteria2 等 UDP 代理）："
+      echo "$udp_drop_rules" | head -3
+    else
+      ok "未检测到 UDP 阻止规则"
+    fi
+  fi
+
+  # ===== 端口限速检测（tc qdisc） =====
+  if cmd_exists tc && [[ -n "${nic:-}" ]]; then
+    local tc_rules
+    tc_rules="$(tc qdisc show dev "$nic" 2>/dev/null || true)"
+    if echo "$tc_rules" | grep -qiE "tbf|htb|cake|police"; then
+      warn "检测到流量整形规则（可能存在端口限速）："
+      echo "$tc_rules" | grep -iE "tbf|htb|cake|police" | head -3
+    else
+      ok "未检测到端口限速规则"
+    fi
+  fi
+
+  line
   [[ -w /etc/sysctl.d ]] || { err "/etc/sysctl.d 不可写"; return 1; }
   sysctl -a >/dev/null 2>&1 || { err "sysctl 读取失败"; return 1; }
 
