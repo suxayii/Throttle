@@ -138,19 +138,23 @@ net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 CONF
 }
-profile_xray_hy2(){ cat <<'CONF'
-# ---- 方案：Xray/Hy2 专项 ----
+profile_udp_quic(){ cat <<'CONF'
+# ---- 方案：UDP 专项（QUIC/UDP 优化） ----
 net.core.netdev_max_backlog = 131072
 net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 131072
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
+net.core.rmem_default = 524288
+net.core.wmem_default = 524288
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
 net.ipv4.tcp_rmem = 4096 87380 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
+net.ipv4.udp_rmem_min = 65536
+net.ipv4.udp_wmem_min = 65536
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 20000
+net.ipv4.udp_mem = 394110 524880 789222
+net.ipv4.tcp_notsent_lowat = 16384
 CONF
 }
 profile_low_1c1g(){ cat <<'CONF'
@@ -234,12 +238,36 @@ net.ipv4.tcp_sack = 1
 CONF
 }
 
+profile_streaming(){ cat <<'CONF'
+# ---- 方案：流媒体代理版（VLESS/Reality TCP 优化） ----
+# 针对 Netflix/YouTube/TikTok 等视频流媒体场景
+net.core.netdev_max_backlog = 65536
+net.core.somaxconn = 16384
+net.ipv4.tcp_max_syn_backlog = 65536
+net.core.rmem_default = 524288
+net.core.wmem_default = 524288
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.ipv4.tcp_rmem = 4096 131072 67108864
+net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+net.ipv4.tcp_notsent_lowat = 131072
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_thin_linear_timeouts = 1
+CONF
+}
+
 emit_profile(){
   case "$1" in
     balanced) profile_balanced ;;
     aggressive) profile_aggressive ;;
     aggressive_safe) profile_aggressive_safe ;;
-    xray_hy2) profile_xray_hy2 ;;
+    udp_quic) profile_udp_quic ;;
+    streaming) profile_streaming ;;
     low_1c1g) profile_low_1c1g ;;
     low_2c2g) profile_low_2c2g ;;
     bw_1g) profile_bw_1g ;;
@@ -337,7 +365,7 @@ precheck(){
   fi
 
   # ===== CPU 性能检测 =====
-  local cpu_model cpu_cores aes_ni
+  local cpu_model cpu_cores
   cpu_model="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo unknown)"
   cpu_cores="$(nproc 2>/dev/null || echo 1)"
   info "CPU：$cpu_model（${cpu_cores}核）"
@@ -580,9 +608,17 @@ clean_old_snapshots(){
 }
 
 rollback_last_apply_point(){
-  [[ -f "$LAST_APPLY_DIR/managed-active.conf" ]] && cp -a "$LAST_APPLY_DIR/managed-active.conf" "$ACTIVE_FILE" || rm -f "$ACTIVE_FILE"
-  [[ -f "$LAST_APPLY_DIR/managed-bbr.conf" ]] && cp -a "$LAST_APPLY_DIR/managed-bbr.conf" "$BBR_SYSCTL_FILE" || true
-  [[ -f "$LAST_APPLY_DIR/managed-modules.conf" ]] && cp -a "$LAST_APPLY_DIR/managed-modules.conf" "$MODULES_CONF" || true
+  if [[ -f "$LAST_APPLY_DIR/managed-active.conf" ]]; then
+    cp -a "$LAST_APPLY_DIR/managed-active.conf" "$ACTIVE_FILE"
+  else
+    rm -f "$ACTIVE_FILE"
+  fi
+  if [[ -f "$LAST_APPLY_DIR/managed-bbr.conf" ]]; then
+    cp -a "$LAST_APPLY_DIR/managed-bbr.conf" "$BBR_SYSCTL_FILE"
+  fi
+  if [[ -f "$LAST_APPLY_DIR/managed-modules.conf" ]]; then
+    cp -a "$LAST_APPLY_DIR/managed-modules.conf" "$MODULES_CONF"
+  fi
 
   if sysctl --system >/tmp/net-tune-v3-rollback.log 2>&1; then
     ok "已回滚到上一次应用点（仅管理文件）"
@@ -603,6 +639,7 @@ save_permanent_baseline(){
   [[ -f "$BBR_SYSCTL_FILE" ]] && cp -a "$BBR_SYSCTL_FILE" "$PERM_DIR/managed-bbr.conf" || true
   [[ -f "$MODULES_CONF" ]] && cp -a "$MODULES_CONF" "$PERM_DIR/managed-modules.conf" || true
 
+  # 注意：heredoc 未加引号，变量会在写入时展开（记录创建时信息）
   cat > "$marker" <<LOCK
 CreatedAt=$(date '+%F %T')
 Host=$(hostname)
@@ -615,7 +652,13 @@ LOCK
 
   if cmd_exists chattr; then
     read -rp "是否给 BASELINE_LOCK 添加不可变属性（chattr +i）？[y/N]: " yn
-    [[ "${yn:-N}" =~ ^[Yy]$ ]] && chattr +i "$marker" 2>/dev/null && ok "已加锁" || true
+    if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
+      if chattr +i "$marker" 2>/dev/null; then
+        ok "已加锁"
+      else
+        warn "chattr +i 失败（文件系统可能不支持）"
+      fi
+    fi
   fi
 }
 
@@ -624,9 +667,17 @@ restore_permanent_baseline(){
   [[ -f "$marker" ]] || { err "未找到永久初始备份"; return 1; }
 
   save_last_and_history_snapshot >/dev/null || true
-  [[ -f "$PERM_DIR/managed-active.conf" ]] && cp -a "$PERM_DIR/managed-active.conf" "$ACTIVE_FILE" || rm -f "$ACTIVE_FILE"
-  [[ -f "$PERM_DIR/managed-bbr.conf" ]] && cp -a "$PERM_DIR/managed-bbr.conf" "$BBR_SYSCTL_FILE" || true
-  [[ -f "$PERM_DIR/managed-modules.conf" ]] && cp -a "$PERM_DIR/managed-modules.conf" "$MODULES_CONF" || true
+  if [[ -f "$PERM_DIR/managed-active.conf" ]]; then
+    cp -a "$PERM_DIR/managed-active.conf" "$ACTIVE_FILE"
+  else
+    rm -f "$ACTIVE_FILE"
+  fi
+  if [[ -f "$PERM_DIR/managed-bbr.conf" ]]; then
+    cp -a "$PERM_DIR/managed-bbr.conf" "$BBR_SYSCTL_FILE"
+  fi
+  if [[ -f "$PERM_DIR/managed-modules.conf" ]]; then
+    cp -a "$PERM_DIR/managed-modules.conf" "$MODULES_CONF"
+  fi
 
   if sysctl --system >/tmp/net-tune-v3-restore-baseline.log 2>&1; then
     ok "已回滚到永久初始配置（管理文件范围）"
@@ -768,7 +819,11 @@ install_packages_from_tmp(){
   if dpkg -i /tmp/linux-*.deb && update_bootloader; then
     ok "内核安装完成"
     read -rp "是否立即重启以加载新内核？[y/N]: " rb
-    [[ "${rb:-N}" =~ ^[Yy]$ ]] && reboot || warn "请稍后手动重启：sudo reboot"
+    if [[ "${rb:-N}" =~ ^[Yy]$ ]]; then
+      reboot
+    else
+      warn "请稍后手动重启：sudo reboot"
+    fi
   else
     err "安装或引导更新失败，请检查系统状态"
     return 1
@@ -940,26 +995,28 @@ choose_profile_menu(){
     echo "1) 平衡版（通用推荐）"
     echo "2) 激进版（高并发/高PPS）"
     echo "3) 激进稳妥版（推荐）"
-    echo "4) Xray/Hy2 专项版"
-    echo "5) 低内存保守版（1C/1G）"
-    echo "6) 低内存保守版（2C/2G）"
-    echo "7) 高带宽版（1G口）"
-    echo "8) 高带宽版（10G口）"
-    echo "9) VPS 极致带宽版（虚拟网卡）"
+    echo "4) UDP 专项版（QUIC/UDP 优化）"
+    echo "5) 流媒体代理版（VLESS/Reality TCP）"
+    echo "6) 低内存保守版（1C/1G）"
+    echo "7) 低内存保守版（2C/2G）"
+    echo "8) 高带宽版（1G口）"
+    echo "9) 高带宽版（10G口）"
+    echo "10) VPS 极致带宽版（虚拟网卡）"
     echo "0) 返回"
     line
-    read -rp "请输入选项 [0-9]: " c
+    read -rp "请输入选项 [0-10]: " c
 
     case "$c" in
       1) p="balanced"; p_name="平衡版（通用推荐）" ;;
       2) p="aggressive"; p_name="激进版（高并发/高PPS）" ;;
       3) p="aggressive_safe"; p_name="激进稳妥版（推荐）" ;;
-      4) p="xray_hy2"; p_name="Xray/Hy2 专项版" ;;
-      5) p="low_1c1g"; p_name="低内存保守版（1C/1G）" ;;
-      6) p="low_2c2g"; p_name="低内存保守版（2C/2G）" ;;
-      7) p="bw_1g"; p_name="高带宽版（1G口）" ;;
-      8) p="bw_10g"; p_name="高带宽版（10G口）" ;;
-      9) p="vps_max"; p_name="VPS 极致带宽版（虚拟网卡）" ;;
+      4) p="udp_quic"; p_name="UDP 专项版（QUIC/UDP 优化）" ;;
+      5) p="streaming"; p_name="流媒体代理版（VLESS/Reality TCP）" ;;
+      6) p="low_1c1g"; p_name="低内存保守版（1C/1G）" ;;
+      7) p="low_2c2g"; p_name="低内存保守版（2C/2G）" ;;
+      8) p="bw_1g"; p_name="高带宽版（1G口）" ;;
+      9) p="bw_10g"; p_name="高带宽版（10G口）" ;;
+      10) p="vps_max"; p_name="VPS 极致带宽版（虚拟网卡）" ;;
       0) return ;;
       *) warn "无效输入"; sleep 1; continue ;;
     esac
@@ -1042,7 +1099,11 @@ main_menu(){
       8) save_permanent_baseline; pause ;;
       9)
         read -rp "确认回滚到永久初始配置？[y/N]: " yn
-        [[ "${yn:-N}" =~ ^[Yy]$ ]] && restore_permanent_baseline || warn "已取消"
+        if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
+          restore_permanent_baseline
+        else
+          warn "已取消"
+        fi
         pause
         ;;
       10) ls -1 "$HISTORY_DIR" 2>/dev/null | sort || true; pause ;;
