@@ -1088,8 +1088,8 @@ apply_system_optimizations(){
 
   # ===== 3. 网卡 Ring Buffer 加大 =====
   echo -e "${BOLD}[3/6] Ring Buffer${NC}"
+  local max_rx="256" max_tx="256"
   if cmd_exists ethtool; then
-    local max_rx max_tx
     max_rx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/RX:/){print $2}}' | head -1)"
     max_tx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/TX:/){print $2}}' | head -1)"
     if [[ -n "$max_rx" && -n "$max_tx" ]]; then
@@ -1176,14 +1176,14 @@ apply_system_optimizations(){
   ok "系统级深度优化完成"
 
   if [[ "${1:-}" == "persist" ]]; then
-    setup_persistence "$nic" "$cpu_count" "$rps_mask" "$xps_mask"
+    setup_persistence "$nic" "$cpu_count" "$rps_mask" "$xps_mask" "$max_rx" "$max_tx"
   else
     warn "当前为临时生效模式，重启后将失效"
   fi
 }
 
 setup_persistence(){
-  local nic="$1" cpu_count="$2" rps_mask="$3" xps_mask="$4"
+  local nic="$1" cpu_count="$2" rps_mask="$3" xps_mask="$4" max_rx="${5:-256}" max_tx="${6:-256}"
   local rc_file="/etc/rc.local"
   
   info "正在配置开机自启..."
@@ -1207,7 +1207,7 @@ if [[ -d /sys/class/net/\$nic ]]; then
   # Multiqueue
   ethtool -L \$nic combined $cpu_count 2>/dev/null
   # Ring Buffer
-  ethtool -G \$nic rx 4096 tx 4096 2>/dev/null
+  ethtool -G \$nic rx $max_rx tx $max_tx 2>/dev/null
   # Offload
   ethtool -K \$nic gso on gro on tso on 2>/dev/null
   # RPS
