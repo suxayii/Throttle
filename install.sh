@@ -1106,8 +1106,18 @@ apply_virtio_optimizations(){
   echo -e "${BOLD}[4/5] 硬件卸载检查${NC}"
   if cmd_exists ethtool; then
     for feat in gso gro tso; do
+      # ethtool -k 输出的是长名称，需要映射
+      local long_feat=""
+      case "$feat" in
+        gso) long_feat="generic-segmentation-offload" ;;
+        gro) long_feat="generic-receive-offload" ;;
+        tso) long_feat="tcp-segmentation-offload" ;;
+      esac
+
       local status
-      status="$(ethtool -k "$nic" 2>/dev/null | grep "^${feat}:" | awk '{print $2}')"
+      # 使用 awk 提取状态，避免 grep 找不到时返回 1 导致脚本退出 (set -e)
+      status="$(ethtool -k "$nic" 2>/dev/null | awk -v f="$long_feat" '$1 == f":" {print $2}')"
+      
       if [[ "$status" == "off" ]]; then
         if ethtool -K "$nic" "$feat" on 2>/dev/null; then
           ok "$feat 已开启"
