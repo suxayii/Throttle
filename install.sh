@@ -1060,7 +1060,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 2. RPS / RFS（软件级多核分发） =====
-  echo -e "${BOLD}[2/7] RPS / RFS 多核分发${NC}"
+  echo -e "${BOLD}[2/5] RPS / RFS 多核分发${NC}"
   local rps_mask
   rps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
 
@@ -1081,7 +1081,7 @@ apply_system_optimizations(){
   fi
 
   if (( rps_applied > 0 )); then
-    ok "RPS 已应用到 $rps_applied 个接收队列（已还原为全核分发）"
+    ok "RPS 已应用到 $rps_applied 个接收队列（掩码：$rps_mask）"
     ok "RFS 已启用（flow_entries=32768，flow_cnt=4096）"
   else
     warn "RPS 设置失败（可能无权限）"
@@ -1153,7 +1153,8 @@ apply_system_optimizations(){
   local xps_applied=0
   local tx_dirs=(/sys/class/net/"$nic"/queues/tx-*)
   if [[ -d "${tx_dirs[0]}" ]]; then
-    # 还原为全核分发策略，让内核调度器自动负载均衡
+    # 简单策略：每个 TX 队列绑定所有 CPU（适合单队列或少量队列）
+    # 对于多队列且队列数==CPU数的高级场景，理想是 1:1 绑定，但这里通用起见用全掩码
     local xps_mask
     xps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
     
@@ -1164,7 +1165,7 @@ apply_system_optimizations(){
       fi
     done
     if (( xps_applied > 0 )); then
-      ok "XPS 已应用到 $xps_applied 个发送队列（已还原为全核分发）"
+      ok "XPS 已应用到 $xps_applied 个发送队列"
     else
       warn "XPS 设置失败（可能不支持或无权限）"
     fi
