@@ -1019,6 +1019,20 @@ apply_virtio_optimizations(){
   local cpu_count
   cpu_count="$(nproc 2>/dev/null || echo 1)"
   info "CPU 核心数：$cpu_count"
+
+  # 自动安装 ethtool（多数优化依赖它）
+  if ! cmd_exists ethtool; then
+    warn "未检测到 ethtool，正在尝试自动安装..."
+    if is_debian_like; then
+      apt-get update -y >/dev/null 2>&1 || true
+      apt-get install -y ethtool >/dev/null 2>&1 && ok "ethtool 安装成功" || warn "ethtool 安装失败，部分优化将跳过"
+    elif cmd_exists yum; then
+      yum install -y ethtool >/dev/null 2>&1 && ok "ethtool 安装成功" || warn "ethtool 安装失败，部分优化将跳过"
+    else
+      warn "无法自动安装 ethtool，请手动安装：apt install ethtool 或 yum install ethtool"
+    fi
+  fi
+
   line
 
   # ===== 1. Virtio 多队列 (Multiqueue) =====
