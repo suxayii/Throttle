@@ -989,9 +989,10 @@ watch_metrics(){
 }
 
 # ===================== Virtio/KVM 网卡优化 =====================
-apply_virtio_optimizations(){
+# ===================== 系统级深度优化（Virtio/XPS/GRO） =====================
+apply_system_optimizations(){
   echo
-  echo -e "${BOLD}【Virtio/KVM 网卡优化】${NC}"
+  echo -e "${BOLD}【系统级深度优化（网卡/队列/中断）】${NC}"
   line
 
   local nic driver
@@ -1147,10 +1148,45 @@ apply_virtio_optimizations(){
     warn "未安装 ethtool，跳过中断合并设置"
   fi
 
+  # ===== 6. XPS (Transmit Packet Steering) =====
+  echo -e "${BOLD}[6/7] XPS 发送队列优化${NC}"
+  local xps_applied=0
+  local tx_dirs=(/sys/class/net/"$nic"/queues/tx-*)
+  if [[ -d "${tx_dirs[0]}" ]]; then
+    # 简单策略：每个 TX 队列绑定所有 CPU（适合单队列或少量队列）
+    # 对于多队列且队列数==CPU数的高级场景，理想是 1:1 绑定，但这里通用起见用全掩码
+    local xps_mask
+    xps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
+    
+    for queue_dir in "${tx_dirs[@]}"; do
+      [[ -d "$queue_dir" ]] || continue
+      if echo "$xps_mask" > "$queue_dir/xps_cpus" 2>/dev/null; then
+        xps_applied=$((xps_applied + 1))
+      fi
+    done
+    if (( xps_applied > 0 )); then
+      ok "XPS 已应用到 $xps_applied 个发送队列"
+    else
+      warn "XPS 设置失败（可能不支持或无权限）"
+    fi
+  else
+    info "未找到 TX 队列，跳过 XPS"
+  fi
+
+  # ===== 7. Busy Poll (低延迟轮询) =====
+  echo -e "${BOLD}[7/7] Busy Poll 低延迟模式${NC}"
+  # 推荐值 50us，平衡延迟与 CPU 占用
+  if sysctl -w net.core.busy_read=50 >/dev/null 2>&1 && \
+     sysctl -w net.core.busy_poll=50 >/dev/null 2>&1; then
+    ok "Busy Poll 已开启 (50us)"
+  else
+    warn "Busy Poll 设置失败"
+  fi
+
   line
-  ok "Virtio/KVM 网卡优化完成"
+  ok "系统级深度优化完成"
   warn "注意：以上设置重启后失效，建议添加到 /etc/rc.local 或 systemd 服务中持久化"
-  log "VIRTIO_OPTIMIZE nic=$nic driver=${driver:-unknown} cpus=$cpu_count"
+  log "SYSTEM_OPTIMIZE nic=$nic driver=${driver:-unknown} cpus=$cpu_count rps=$rps_applied xps=$xps_applied"
 }
 
 # ===================== 脚本更新 =====================
@@ -1305,7 +1341,7 @@ main_menu(){
     echo "9) 回滚到永久初始配置（管理文件范围）"
     echo "10) 查看历史快照列表"
     echo "11) 清理旧快照（保留最近20个）"
-    echo "12) Virtio/KVM 网卡优化"
+    echo "12) 网卡/系统级深度优化 (Virtio/XPS/GRO)"
     echo "13) 更新脚本"
     echo "0) 退出"
     line
@@ -1330,7 +1366,7 @@ main_menu(){
         ;;
       10) ls -1 "$HISTORY_DIR" 2>/dev/null | sort || true; pause ;;
       11) clean_old_snapshots 20; pause ;;
-      12) apply_virtio_optimizations; pause ;;
+      12) apply_system_optimizations; pause ;;
       13) update_script; pause ;;
       0) ok "已退出"; exit 0 ;;
       *) warn "无效输入"; sleep 1 ;;
