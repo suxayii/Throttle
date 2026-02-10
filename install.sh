@@ -18,6 +18,9 @@ touch "$LOG_FILE"
 CURRENT_PROFILE=""
 ARCH="$(uname -m)"
 
+# 版本号
+VERSION="3.1.0"
+
 # ===================== 颜色 =====================
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[36m'; BOLD='\033[1m'; NC='\033[0m'
 ok(){ echo -e "${GREEN}✅ $*${NC}"; }
@@ -1150,6 +1153,58 @@ apply_virtio_optimizations(){
   log "VIRTIO_OPTIMIZE nic=$nic driver=${driver:-unknown} cpus=$cpu_count"
 }
 
+# ===================== 脚本更新 =====================
+update_script(){
+  echo
+  echo -e "${BOLD}【脚本更新】${NC}"
+  line
+  info "当前版本：$VERSION"
+  info "正在检查新版本..."
+
+  local update_url="https://raw.githubusercontent.com/suxayii/Throttle/master/install.sh"
+  local tmp_file="/tmp/net-tune-pro-update.sh"
+
+  if cmd_exists curl; then
+    curl -fsSL "$update_url" -o "$tmp_file"
+  elif cmd_exists wget; then
+    wget -qO "$tmp_file" "$update_url"
+  else
+    err "未找到 curl 或 wget，无法下载更新"
+    return 1
+  fi
+
+  if [[ ! -s "$tmp_file" ]]; then
+    err "下载失败或文件为空，请检查网络连接"
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  # 简单的内容比对
+  if cmp -s "$0" "$tmp_file"; then
+    ok "当前已是最新版本"
+    rm -f "$tmp_file"
+    return 0
+  else
+    # 尝试提取新版本号（如果脚本里有定义 VERSION）
+    local new_ver
+    new_ver="$(grep '^VERSION=' "$tmp_file" | head -1 | cut -d'"' -f2)"
+    [[ -z "$new_ver" ]] && new_ver="未知"
+    
+    info "发现新版本：$new_ver"
+    read -rp "是否更新脚本？[y/N]: " yn
+    if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
+      mv "$tmp_file" "$0"
+      chmod +x "$0"
+      ok "脚本更新成功，即将重新加载..."
+      sleep 2
+      exec bash "$0"
+    else
+      info "已取消更新"
+      rm -f "$tmp_file"
+    fi
+  fi
+}
+
 # ===================== 菜单 =====================
 choose_profile_menu(){
   local p p_name
@@ -1251,6 +1306,7 @@ main_menu(){
     echo "10) 查看历史快照列表"
     echo "11) 清理旧快照（保留最近20个）"
     echo "12) Virtio/KVM 网卡优化"
+    echo "13) 更新脚本"
     echo "0) 退出"
     line
     read -rp "请输入选项: " ch
@@ -1275,6 +1331,7 @@ main_menu(){
       10) ls -1 "$HISTORY_DIR" 2>/dev/null | sort || true; pause ;;
       11) clean_old_snapshots 20; pause ;;
       12) apply_virtio_optimizations; pause ;;
+      13) update_script; pause ;;
       0) ok "已退出"; exit 0 ;;
       *) warn "无效输入"; sleep 1 ;;
     esac
