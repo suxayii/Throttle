@@ -1182,16 +1182,6 @@ apply_system_optimizations(){
     info "未找到 TX 队列，跳过 XPS"
   fi
 
-  # ===== 7. Busy Poll (低延迟轮询) =====
-  echo -e "${BOLD}[7/7] Busy Poll 低延迟模式${NC}"
-  # 推荐值 50us，平衡延迟与 CPU 占用
-  if sysctl -w net.core.busy_read=50 >/dev/null 2>&1 && \
-     sysctl -w net.core.busy_poll=50 >/dev/null 2>&1; then
-    ok "Busy Poll 已开启 (50us)"
-  else
-    warn "Busy Poll 设置失败"
-  fi
-
   line
   ok "系统级深度优化完成"
   warn "注意：以上设置重启后失效，建议添加到 /etc/rc.local 或 systemd 服务中持久化"
