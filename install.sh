@@ -19,7 +19,7 @@ CURRENT_PROFILE=""
 ARCH="$(uname -m)"
 
 # 版本号
-VERSION="3.1.0"
+VERSION="3.2.0"
 
 # ===================== 颜色 =====================
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -988,7 +988,6 @@ watch_metrics(){
   done
 }
 
-# ===================== Virtio/KVM 网卡优化 =====================
 # ===================== 系统级深度优化（Virtio/XPS/GRO） =====================
 apply_system_optimizations(){
   echo
@@ -1040,7 +1039,7 @@ apply_system_optimizations(){
   line
 
   # ===== 1. Virtio 多队列 (Multiqueue) =====
-  echo -e "${BOLD}[1/5] Virtio 多队列${NC}"
+  echo -e "${BOLD}[1/6] Virtio 多队列${NC}"
   if cmd_exists ethtool; then
     local max_combined current_combined
     max_combined="$(ethtool -l "$nic" 2>/dev/null | awk '/Combined:/{v=$2} END{print v}')"
@@ -1060,7 +1059,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 2. RPS / RFS（软件级多核分发） =====
-  echo -e "${BOLD}[2/5] RPS / RFS 多核分发${NC}"
+  echo -e "${BOLD}[2/6] RPS / RFS 多核分发${NC}"
   local rps_mask
   rps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
 
@@ -1088,7 +1087,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 3. 网卡 Ring Buffer 加大 =====
-  echo -e "${BOLD}[3/5] Ring Buffer${NC}"
+  echo -e "${BOLD}[3/6] Ring Buffer${NC}"
   if cmd_exists ethtool; then
     local max_rx max_tx
     max_rx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/RX:/){print $2}}' | head -1)"
@@ -1107,7 +1106,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 4. 硬件卸载（GSO/GRO/TSO） =====
-  echo -e "${BOLD}[4/5] 硬件卸载检查${NC}"
+  echo -e "${BOLD}[4/6] 硬件卸载检查${NC}"
   if cmd_exists ethtool; then
     for feat in gso gro tso; do
       # ethtool -k 输出的是长名称，需要映射
@@ -1137,7 +1136,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 5. 中断合并（减少 CPU 开销） =====
-  echo -e "${BOLD}[5/5] 中断合并${NC}"
+  echo -e "${BOLD}[5/6] 中断合并${NC}"
   if cmd_exists ethtool; then
     if ethtool -C "$nic" adaptive-rx on adaptive-tx on 2>/dev/null; then
       ok "自适应中断合并已开启"
@@ -1149,13 +1148,13 @@ apply_system_optimizations(){
   fi
 
   # ===== 6. XPS (Transmit Packet Steering) =====
-  echo -e "${BOLD}[6/7] XPS 发送队列优化${NC}"
+  echo -e "${BOLD}[6/6] XPS 发送队列优化${NC}"
   local xps_applied=0
+  local xps_mask="$rps_mask"
   local tx_dirs=(/sys/class/net/"$nic"/queues/tx-*)
   if [[ -d "${tx_dirs[0]}" ]]; then
     # 简单策略：每个 TX 队列绑定所有 CPU（适合单队列或少量队列）
     # 对于多队列且队列数==CPU数的高级场景，理想是 1:1 绑定，但这里通用起见用全掩码
-    local xps_mask
     xps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
     
     for queue_dir in "${tx_dirs[@]}"; do
@@ -1191,7 +1190,7 @@ setup_persistence(){
 
   # 确保 rc.local 存在并可执行
   if [[ ! -f "$rc_file" ]]; then
-    echo -e '#!/bin/bash\nexit 0' > "$rc_file"
+    printf '#!/bin/bash\nexit 0\n' > "$rc_file"
   fi
   chmod +x "$rc_file"
 
