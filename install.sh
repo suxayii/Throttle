@@ -985,6 +985,147 @@ watch_metrics(){
   done
 }
 
+# ===================== Virtio/KVM 网卡优化 =====================
+apply_virtio_optimizations(){
+  echo
+  echo -e "${BOLD}【Virtio/KVM 网卡优化】${NC}"
+  line
+
+  local nic driver
+  nic="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+  if [[ -z "${nic:-}" ]]; then
+    err "未检测到默认网卡"
+    return 1
+  fi
+  info "默认网卡：$nic"
+
+  # 检测驱动类型
+  driver=""
+  if [[ -r "/sys/class/net/$nic/device/driver" ]]; then
+    driver="$(basename "$(readlink -f "/sys/class/net/$nic/device/driver")" 2>/dev/null || true)"
+  elif [[ -r "/sys/class/net/$nic/device/uevent" ]]; then
+    driver="$(awk -F= '/^DRIVER=/{print $2}' "/sys/class/net/$nic/device/uevent" 2>/dev/null || true)"
+  fi
+  info "网卡驱动：${driver:-unknown}"
+
+  if [[ "${driver:-}" != "virtio_net" && "${driver:-}" != "virtio-pci" ]]; then
+    warn "当前网卡驱动不是 virtio_net，部分优化可能不适用"
+    read -rp "是否继续？[y/N]: " yn
+    if [[ ! "${yn:-N}" =~ ^[Yy]$ ]]; then
+      return 0
+    fi
+  fi
+
+  local cpu_count
+  cpu_count="$(nproc 2>/dev/null || echo 1)"
+  info "CPU 核心数：$cpu_count"
+  line
+
+  # ===== 1. Virtio 多队列 (Multiqueue) =====
+  echo -e "${BOLD}[1/5] Virtio 多队列${NC}"
+  if cmd_exists ethtool; then
+    local max_combined current_combined
+    max_combined="$(ethtool -l "$nic" 2>/dev/null | awk '/Combined:/{v=$2} END{print v}')"
+    current_combined="$(ethtool -l "$nic" 2>/dev/null | awk '/Combined:/{print $2; exit}')"
+    if [[ -n "$max_combined" && "$max_combined" -gt 1 ]] 2>/dev/null; then
+      local target=$((cpu_count < max_combined ? cpu_count : max_combined))
+      if ethtool -L "$nic" combined "$target" 2>/dev/null; then
+        ok "多队列已设置为 $target（最大 $max_combined）"
+      else
+        warn "多队列设置失败（当前：${current_combined:-unknown}）"
+      fi
+    else
+      info "网卡不支持多队列或已是单队列"
+    fi
+  else
+    warn "未安装 ethtool，跳过多队列设置"
+  fi
+
+  # ===== 2. RPS / RFS（软件级多核分发） =====
+  echo -e "${BOLD}[2/5] RPS / RFS 多核分发${NC}"
+  local rps_mask
+  rps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
+
+  local rps_applied=0
+  local queue_dir
+  for queue_dir in /sys/class/net/"$nic"/queues/rx-*; do
+    [[ -d "$queue_dir" ]] || continue
+    if echo "$rps_mask" > "$queue_dir/rps_cpus" 2>/dev/null; then
+      rps_applied=$((rps_applied + 1))
+    fi
+    if [[ -w "$queue_dir/rps_flow_cnt" ]]; then
+      echo 4096 > "$queue_dir/rps_flow_cnt" 2>/dev/null || true
+    fi
+  done
+
+  if [[ -w /proc/sys/net/core/rps_sock_flow_entries ]]; then
+    echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+  fi
+
+  if (( rps_applied > 0 )); then
+    ok "RPS 已应用到 $rps_applied 个接收队列（掩码：$rps_mask）"
+    ok "RFS 已启用（flow_entries=32768，flow_cnt=4096）"
+  else
+    warn "RPS 设置失败（可能无权限）"
+  fi
+
+  # ===== 3. 网卡 Ring Buffer 加大 =====
+  echo -e "${BOLD}[3/5] Ring Buffer${NC}"
+  if cmd_exists ethtool; then
+    local max_rx max_tx
+    max_rx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/RX:/){print $2}}' | head -1)"
+    max_tx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/TX:/){print $2}}' | head -1)"
+    if [[ -n "$max_rx" && -n "$max_tx" ]]; then
+      if ethtool -G "$nic" rx "$max_rx" tx "$max_tx" 2>/dev/null; then
+        ok "Ring Buffer 已设为最大值（RX=$max_rx TX=$max_tx）"
+      else
+        info "Ring Buffer 设置失败或已是最大值"
+      fi
+    else
+      info "Ring Buffer 信息读取失败，跳过"
+    fi
+  else
+    warn "未安装 ethtool，跳过 Ring Buffer 设置"
+  fi
+
+  # ===== 4. 硬件卸载（GSO/GRO/TSO） =====
+  echo -e "${BOLD}[4/5] 硬件卸载检查${NC}"
+  if cmd_exists ethtool; then
+    for feat in gso gro tso; do
+      local status
+      status="$(ethtool -k "$nic" 2>/dev/null | grep "^${feat}:" | awk '{print $2}')"
+      if [[ "$status" == "off" ]]; then
+        if ethtool -K "$nic" "$feat" on 2>/dev/null; then
+          ok "$feat 已开启"
+        else
+          warn "$feat 开启失败（可能不支持）"
+        fi
+      else
+        ok "$feat 已是开启状态"
+      fi
+    done
+  else
+    warn "未安装 ethtool，跳过硬件卸载检查"
+  fi
+
+  # ===== 5. 中断合并（减少 CPU 开销） =====
+  echo -e "${BOLD}[5/5] 中断合并${NC}"
+  if cmd_exists ethtool; then
+    if ethtool -C "$nic" adaptive-rx on adaptive-tx on 2>/dev/null; then
+      ok "自适应中断合并已开启"
+    else
+      info "自适应中断合并设置失败（virtio 可能不支持，这是正常的）"
+    fi
+  else
+    warn "未安装 ethtool，跳过中断合并设置"
+  fi
+
+  line
+  ok "Virtio/KVM 网卡优化完成"
+  warn "注意：以上设置重启后失效，建议添加到 /etc/rc.local 或 systemd 服务中持久化"
+  log "VIRTIO_OPTIMIZE nic=$nic driver=${driver:-unknown} cpus=$cpu_count"
+}
+
 # ===================== 菜单 =====================
 choose_profile_menu(){
   local p p_name
@@ -1085,6 +1226,7 @@ main_menu(){
     echo "9) 回滚到永久初始配置（管理文件范围）"
     echo "10) 查看历史快照列表"
     echo "11) 清理旧快照（保留最近20个）"
+    echo "12) Virtio/KVM 网卡优化"
     echo "0) 退出"
     line
     read -rp "请输入选项: " ch
@@ -1108,6 +1250,7 @@ main_menu(){
         ;;
       10) ls -1 "$HISTORY_DIR" 2>/dev/null | sort || true; pause ;;
       11) clean_old_snapshots 20; pause ;;
+      12) apply_virtio_optimizations; pause ;;
       0) ok "已退出"; exit 0 ;;
       *) warn "无效输入"; sleep 1 ;;
     esac
