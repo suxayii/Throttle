@@ -252,11 +252,10 @@ net.ipv4.tcp_rmem = 4096 131072 67108864
 net.ipv4.tcp_wmem = 4096 131072 67108864
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
-net.ipv4.tcp_notsent_lowat = 131072
+net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
-net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_thin_linear_timeouts = 1
 CONF
 }
