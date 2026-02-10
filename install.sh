@@ -1059,21 +1059,27 @@ apply_system_optimizations(){
     warn "未安装 ethtool，跳过多队列设置"
   fi
 
-  # ===== 2. RPS / RFS（软件级多核分发） =====
-  echo -e "${BOLD}[2/5] RPS / RFS 多核分发${NC}"
-  local rps_mask
-  rps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
-
+  # ===== 2. RPS / RFS（软件级多核分发：1:1 绑定） =====
+  echo -e "${BOLD}[2/7] RPS / RFS 多核分发${NC}"
   local rps_applied=0
   local queue_dir
+  local idx=0
+  
   for queue_dir in /sys/class/net/"$nic"/queues/rx-*; do
     [[ -d "$queue_dir" ]] || continue
-    if echo "$rps_mask" > "$queue_dir/rps_cpus" 2>/dev/null; then
+    
+    # 计算亲和性掩码：1 << (idx % cpu_count)
+    # 实现队列与 CPU 的 1:1 绑定，避免 cache thrashing
+    local cpu_mask
+    cpu_mask="$(printf '%x' $(( 1 << (idx % cpu_count) )))"
+    
+    if echo "$cpu_mask" > "$queue_dir/rps_cpus" 2>/dev/null; then
       rps_applied=$((rps_applied + 1))
     fi
     if [[ -w "$queue_dir/rps_flow_cnt" ]]; then
       echo 4096 > "$queue_dir/rps_flow_cnt" 2>/dev/null || true
     fi
+    idx=$((idx + 1))
   done
 
   if [[ -w /proc/sys/net/core/rps_sock_flow_entries ]]; then
@@ -1081,7 +1087,7 @@ apply_system_optimizations(){
   fi
 
   if (( rps_applied > 0 )); then
-    ok "RPS 已应用到 $rps_applied 个接收队列（掩码：$rps_mask）"
+    ok "RPS 已应用到 $rps_applied 个接收队列（1:1 绑定模式）"
     ok "RFS 已启用（flow_entries=32768，flow_cnt=4096）"
   else
     warn "RPS 设置失败（可能无权限）"
@@ -1148,24 +1154,27 @@ apply_system_optimizations(){
     warn "未安装 ethtool，跳过中断合并设置"
   fi
 
-  # ===== 6. XPS (Transmit Packet Steering) =====
+  # ===== 6. XPS (Transmit Packet Steering：1:1 绑定) =====
   echo -e "${BOLD}[6/7] XPS 发送队列优化${NC}"
   local xps_applied=0
   local tx_dirs=(/sys/class/net/"$nic"/queues/tx-*)
   if [[ -d "${tx_dirs[0]}" ]]; then
-    # 简单策略：每个 TX 队列绑定所有 CPU（适合单队列或少量队列）
-    # 对于多队列且队列数==CPU数的高级场景，理想是 1:1 绑定，但这里通用起见用全掩码
-    local xps_mask
-    xps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
-    
+    local idx=0
     for queue_dir in "${tx_dirs[@]}"; do
       [[ -d "$queue_dir" ]] || continue
-      if echo "$xps_mask" > "$queue_dir/xps_cpus" 2>/dev/null; then
+      
+      # 同样使用 1:1 绑定策略
+      local cpu_mask
+      cpu_mask="$(printf '%x' $(( 1 << (idx % cpu_count) )))"
+      
+      if echo "$cpu_mask" > "$queue_dir/xps_cpus" 2>/dev/null; then
         xps_applied=$((xps_applied + 1))
       fi
+      idx=$((idx + 1))
     done
+    
     if (( xps_applied > 0 )); then
-      ok "XPS 已应用到 $xps_applied 个发送队列"
+      ok "XPS 已应用到 $xps_applied 个发送队列（1:1 绑定模式）"
     else
       warn "XPS 设置失败（可能不支持或无权限）"
     fi
