@@ -241,15 +241,16 @@ CONF
 profile_streaming(){ cat <<'CONF'
 # ---- 方案：流媒体代理版（VLESS/Reality TCP 优化） ----
 # 针对 Netflix/YouTube/TikTok 等视频流媒体场景
-net.core.netdev_max_backlog = 65536
-net.core.somaxconn = 16384
-net.ipv4.tcp_max_syn_backlog = 65536
-net.core.rmem_default = 524288
-net.core.wmem_default = 524288
+# 基于激进稳妥版缓冲区 + 流媒体专用 TCP 选项
+net.core.netdev_max_backlog = 131072
+net.core.somaxconn = 32768
+net.ipv4.tcp_max_syn_backlog = 131072
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
-net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 net.ipv4.tcp_notsent_lowat = 16384
