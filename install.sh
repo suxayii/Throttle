@@ -19,7 +19,7 @@ CURRENT_PROFILE=""
 ARCH="$(uname -m)"
 
 # 版本号
-VERSION="3.2.0"
+VERSION="3.3.0"
 
 # ===================== 颜色 =====================
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -1147,7 +1147,6 @@ apply_system_optimizations(){
     warn "未安装 ethtool，跳过中断合并设置"
   fi
 
-
   line
   ok "系统级深度优化完成"
 
@@ -1242,6 +1241,112 @@ restore_system_optimizations(){
   
   line
   ok "还原操作完成，建议重启系统确保一切恢复初始状态"
+}
+
+# ===================== Swap 优化 =====================
+optimize_swap(){
+  echo
+  echo -e "${BOLD}【Swap 优化】${NC}"
+  line
+
+  local total_mem_kb total_mem_mb swap_total_kb
+  total_mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  total_mem_mb=$((total_mem_kb / 1024))
+  swap_total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+
+  info "物理内存：${total_mem_mb} MB"
+  info "当前 Swap 总量：$((swap_total_kb / 1024)) MB"
+
+  local current_swappiness
+  current_swappiness="$(sysctl -n vm.swappiness 2>/dev/null || echo 60)"
+  info "当前 swappiness：$current_swappiness"
+
+  if (( swap_total_kb == 0 )); then
+    ok "当前系统未启用 Swap，无需操作"
+    return 0
+  fi
+
+  local action=""
+  if (( total_mem_mb > 1024 )); then
+    # 大于 1G 内存：自动关闭 swap
+    info "内存大于 1G，建议关闭 Swap 以提升性能"
+    read -rp "确认关闭 Swap 并释放空间？[Y/n]: " yn
+    if [[ "${yn:-Y}" =~ ^[Nn]$ ]]; then
+      warn "已取消"
+      return 0
+    fi
+    action="disable"
+  else
+    # 小于等于 1G 内存：让用户选择
+    warn "内存 ≤ 1G，关闭 Swap 有 OOM 风险，请谨慎选择"
+    echo
+    echo "1) 关闭 Swap 并释放空间（激进，适合单一代理用途）"
+    echo "2) 降低 swappiness 至 10（稳妥推荐）"
+    echo "0) 取消"
+    read -rp "请选择 [0-2]: " sc
+    case "$sc" in
+      1) action="disable" ;;
+      2) action="lower" ;;
+      0|*) warn "已取消"; return 0 ;;
+    esac
+  fi
+
+  if [[ "$action" == "disable" ]]; then
+    # ---- 关闭 Swap 并释放空间 ----
+    info "正在关闭所有 Swap..."
+    swapoff -a 2>/dev/null || { err "swapoff 失败"; return 1; }
+    ok "Swap 已关闭"
+
+    # 删除 swap 文件（常见路径）
+    local swapfile
+    for swapfile in /swapfile /swap /swap.img; do
+      if [[ -f "$swapfile" ]]; then
+        local size_mb
+        size_mb="$(du -m "$swapfile" 2>/dev/null | awk '{print $1}')"
+        rm -f "$swapfile"
+        ok "已删除 swap 文件：$swapfile（释放 ${size_mb:-?} MB）"
+      fi
+    done
+
+    # 注释 fstab 中的 swap 行
+    if grep -qE '^[^#].*\bswap\b' /etc/fstab 2>/dev/null; then
+      sed -i '/\bswap\b/s/^/#/' /etc/fstab
+      ok "已注释 /etc/fstab 中的 swap 条目（重启后不会恢复）"
+    fi
+
+    # 设置 swappiness 为 0
+    sysctl -w vm.swappiness=0 >/dev/null 2>&1
+    # 永久写入
+    if grep -q '^vm.swappiness' /etc/sysctl.conf 2>/dev/null; then
+      sed -i '/^vm.swappiness/d' /etc/sysctl.conf
+    fi
+    echo "vm.swappiness=0" >> /etc/sysctl.conf
+
+    ok "swappiness 已设为 0（已永久保存）"
+
+    line
+    local freed_mb=$((swap_total_kb / 1024))
+    ok "Swap 优化完成，共释放约 ${freed_mb} MB 磁盘空间"
+
+  elif [[ "$action" == "lower" ]]; then
+    # ---- 降低 swappiness ----
+    sysctl -w vm.swappiness=10 >/dev/null 2>&1
+    sysctl -w vm.vfs_cache_pressure=50 >/dev/null 2>&1
+
+    # 永久写入
+    local param
+    for param in "vm.swappiness=10" "vm.vfs_cache_pressure=50"; do
+      local key="${param%%=*}"
+      if grep -q "^${key}" /etc/sysctl.conf 2>/dev/null; then
+        sed -i "/^${key}/d" /etc/sysctl.conf
+      fi
+      echo "$param" >> /etc/sysctl.conf
+    done
+
+    line
+    ok "swappiness 已降至 10，vfs_cache_pressure 已降至 50（已永久保存）"
+    info "Swap 仍保留作为安全缓冲，但内核将极少使用"
+  fi
 }
 
 system_optimize_menu(){
@@ -1417,7 +1522,8 @@ main_menu(){
     echo "10) 查看历史快照列表"
     echo "11) 清理旧快照（保留最近20个）"
     echo "12) 网卡/系统级深度优化 (Virtio/GRO)"
-    echo "13) 更新脚本"
+    echo "13) Swap 优化（关闭/降低 swappiness）"
+    echo "14) 更新脚本"
     echo "0) 退出"
     line
     read -rp "请输入选项: " ch
@@ -1442,7 +1548,8 @@ main_menu(){
       10) ls -1 "$HISTORY_DIR" 2>/dev/null | sort || true; pause ;;
       11) clean_old_snapshots 20; pause ;;
       12) system_optimize_menu ;;
-      13) update_script; pause ;;
+      13) optimize_swap; pause ;;
+      14) update_script; pause ;;
       0) ok "已退出"; exit 0 ;;
       *) warn "无效输入"; sleep 1 ;;
     esac
