@@ -988,7 +988,7 @@ watch_metrics(){
   done
 }
 
-# ===================== 系统级深度优化（Virtio/XPS/GRO） =====================
+# ===================== 系统级深度优化（Virtio/GRO） =====================
 apply_system_optimizations(){
   echo
   echo -e "${BOLD}【系统级深度优化（网卡/队列/中断）】${NC}"
@@ -1039,7 +1039,7 @@ apply_system_optimizations(){
   line
 
   # ===== 1. Virtio 多队列 (Multiqueue) =====
-  echo -e "${BOLD}[1/6] Virtio 多队列${NC}"
+  echo -e "${BOLD}[1/5] Virtio 多队列${NC}"
   if cmd_exists ethtool; then
     local max_combined current_combined
     max_combined="$(ethtool -l "$nic" 2>/dev/null | awk '/Combined:/{v=$2} END{print v}')"
@@ -1059,7 +1059,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 2. RPS / RFS（软件级多核分发） =====
-  echo -e "${BOLD}[2/6] RPS / RFS 多核分发${NC}"
+  echo -e "${BOLD}[2/5] RPS / RFS 多核分发${NC}"
   local rps_mask
   rps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
 
@@ -1087,7 +1087,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 3. 网卡 Ring Buffer 加大 =====
-  echo -e "${BOLD}[3/6] Ring Buffer${NC}"
+  echo -e "${BOLD}[3/5] Ring Buffer${NC}"
   local max_rx="256" max_tx="256"
   if cmd_exists ethtool; then
     max_rx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/RX:/){print $2}}' | head -1)"
@@ -1106,7 +1106,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 4. 硬件卸载（GSO/GRO/TSO） =====
-  echo -e "${BOLD}[4/6] 硬件卸载检查${NC}"
+  echo -e "${BOLD}[4/5] 硬件卸载检查${NC}"
   if cmd_exists ethtool; then
     for feat in gso gro tso; do
       # ethtool -k 输出的是长名称，需要映射
@@ -1136,7 +1136,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 5. 中断合并（减少 CPU 开销） =====
-  echo -e "${BOLD}[5/6] 中断合并${NC}"
+  echo -e "${BOLD}[5/5] 中断合并${NC}"
   if cmd_exists ethtool; then
     if ethtool -C "$nic" adaptive-rx on adaptive-tx on 2>/dev/null; then
       ok "自适应中断合并已开启"
@@ -1147,43 +1147,19 @@ apply_system_optimizations(){
     warn "未安装 ethtool，跳过中断合并设置"
   fi
 
-  # ===== 6. XPS (Transmit Packet Steering) =====
-  echo -e "${BOLD}[6/6] XPS 发送队列优化${NC}"
-  local xps_applied=0
-  local xps_mask="$rps_mask"
-  local tx_dirs=(/sys/class/net/"$nic"/queues/tx-*)
-  if [[ -d "${tx_dirs[0]}" ]]; then
-    # 简单策略：每个 TX 队列绑定所有 CPU（适合单队列或少量队列）
-    # 对于多队列且队列数==CPU数的高级场景，理想是 1:1 绑定，但这里通用起见用全掩码
-    xps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
-    
-    for queue_dir in "${tx_dirs[@]}"; do
-      [[ -d "$queue_dir" ]] || continue
-      if echo "$xps_mask" > "$queue_dir/xps_cpus" 2>/dev/null; then
-        xps_applied=$((xps_applied + 1))
-      fi
-    done
-    if (( xps_applied > 0 )); then
-      ok "XPS 已应用到 $xps_applied 个发送队列"
-    else
-      warn "XPS 设置失败（可能不支持或无权限）"
-    fi
-  else
-    info "未找到 TX 队列，跳过 XPS"
-  fi
 
   line
   ok "系统级深度优化完成"
 
   if [[ "${1:-}" == "persist" ]]; then
-    setup_persistence "$nic" "$cpu_count" "$rps_mask" "$xps_mask" "$max_rx" "$max_tx"
+    setup_persistence "$nic" "$cpu_count" "$rps_mask" "$max_rx" "$max_tx"
   else
     warn "当前为临时生效模式，重启后将失效"
   fi
 }
 
 setup_persistence(){
-  local nic="$1" cpu_count="$2" rps_mask="$3" xps_mask="$4" max_rx="${5:-256}" max_tx="${6:-256}"
+  local nic="$1" cpu_count="$2" rps_mask="$3" max_rx="${4:-256}" max_tx="${5:-256}"
   local rc_file="/etc/rc.local"
   
   info "正在配置开机自启..."
@@ -1217,10 +1193,7 @@ if [[ -d /sys/class/net/\$nic ]]; then
   done
   # RFS
   echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
-  # XPS
-  for q in /sys/class/net/\$nic/queues/tx-*; do
-    echo $xps_mask > \$q/xps_cpus 2>/dev/null
-  done
+
 fi
 # Net-Tune-Pro-System-Optimize-End"
 
@@ -1256,14 +1229,11 @@ restore_system_optimizations(){
     ok "已清除开机自启配置"
   fi
 
-  # 还原 RPS/XPS (清零掩码或设为0)
+  # 还原 RPS (清零掩码)
   for q in /sys/class/net/"$nic"/queues/rx-*; do
     echo 0 > "$q/rps_cpus" 2>/dev/null || true
   done
-  for q in /sys/class/net/"$nic"/queues/tx-*; do
-    echo 0 > "$q/xps_cpus" 2>/dev/null || true
-  done
-  ok "已重置 RPS/XPS（恢复内核默认调度）"
+  ok "已重置 RPS（恢复内核默认调度）"
 
   # RFS 全局表无法轻易还原默认值，通常重启即可，这里不强行改回 0 以免影响其他服务
   
@@ -1446,7 +1416,7 @@ main_menu(){
     echo "9) 回滚到永久初始配置（管理文件范围）"
     echo "10) 查看历史快照列表"
     echo "11) 清理旧快照（保留最近20个）"
-    echo "12) 网卡/系统级深度优化 (Virtio/XPS/GRO)"
+    echo "12) 网卡/系统级深度优化 (Virtio/GRO)"
     echo "13) 更新脚本"
     echo "0) 退出"
     line
