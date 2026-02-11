@@ -264,6 +264,37 @@ net.ipv4.tcp_thin_linear_timeouts = 1
 CONF
 }
 
+profile_http_proxy(){ cat <<'CONF'
+# ---- 方案：HTTP 代理专项版（高并发 TCP 代理优化） ----
+# 针对 Squid/Nginx/HAProxy/Clash 等 HTTP(S) 代理场景
+# 特点：高连接数、短连接周转快、TIME_WAIT 回收、低延迟响应
+net.core.netdev_max_backlog = 131072
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 262144
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+# HTTP 代理专用优化
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 3
+net.ipv4.tcp_max_tw_buckets = 65536
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.core.optmem_max = 65536
+net.ipv4.tcp_max_orphans = 65536
+CONF
+}
+
 emit_profile(){
   case "$1" in
     balanced) profile_balanced ;;
@@ -271,6 +302,7 @@ emit_profile(){
     aggressive_safe) profile_aggressive_safe ;;
     udp_quic) profile_udp_quic ;;
     streaming) profile_streaming ;;
+    http_proxy) profile_http_proxy ;;
     low_1c1g) profile_low_1c1g ;;
     low_2c2g) profile_low_2c2g ;;
     bw_1g) profile_bw_1g ;;
@@ -1433,14 +1465,15 @@ choose_profile_menu(){
     echo "3) 激进稳妥版（推荐）"
     echo "4) UDP 专项版（QUIC/UDP 优化）"
     echo "5) 流媒体代理版（VLESS/Reality TCP）"
-    echo "6) 低内存保守版（1C/1G）"
-    echo "7) 低内存保守版（2C/2G）"
-    echo "8) 高带宽版（1G口）"
-    echo "9) 高带宽版（10G口）"
-    echo "10) VPS 极致带宽版（虚拟网卡）"
+    echo "6) HTTP 代理专项版（Squid/Nginx/Clash）"
+    echo "7) 低内存保守版（1C/1G）"
+    echo "8) 低内存保守版（2C/2G）"
+    echo "9) 高带宽版（1G口）"
+    echo "10) 高带宽版（10G口）"
+    echo "11) VPS 极致带宽版（虚拟网卡）"
     echo "0) 返回"
     line
-    read -rp "请输入选项 [0-10]: " c
+    read -rp "请输入选项 [0-11]: " c
 
     case "$c" in
       1) p="balanced"; p_name="平衡版（通用推荐）" ;;
@@ -1448,11 +1481,12 @@ choose_profile_menu(){
       3) p="aggressive_safe"; p_name="激进稳妥版（推荐）" ;;
       4) p="udp_quic"; p_name="UDP 专项版（QUIC/UDP 优化）" ;;
       5) p="streaming"; p_name="流媒体代理版（VLESS/Reality TCP）" ;;
-      6) p="low_1c1g"; p_name="低内存保守版（1C/1G）" ;;
-      7) p="low_2c2g"; p_name="低内存保守版（2C/2G）" ;;
-      8) p="bw_1g"; p_name="高带宽版（1G口）" ;;
-      9) p="bw_10g"; p_name="高带宽版（10G口）" ;;
-      10) p="vps_max"; p_name="VPS 极致带宽版（虚拟网卡）" ;;
+      6) p="http_proxy"; p_name="HTTP 代理专项版（Squid/Nginx/Clash）" ;;
+      7) p="low_1c1g"; p_name="低内存保守版（1C/1G）" ;;
+      8) p="low_2c2g"; p_name="低内存保守版（2C/2G）" ;;
+      9) p="bw_1g"; p_name="高带宽版（1G口）" ;;
+      10) p="bw_10g"; p_name="高带宽版（10G口）" ;;
+      11) p="vps_max"; p_name="VPS 极致带宽版（虚拟网卡）" ;;
       0) return ;;
       *) warn "无效输入"; sleep 1; continue ;;
     esac
