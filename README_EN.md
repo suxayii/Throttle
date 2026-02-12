@@ -27,18 +27,21 @@ This project provides a set of efficient, easy-to-use Linux server network manag
 **Recommended! The most powerful all-in-one network optimization profile manager.** Integrates various preset optimization plans with atomic configuration and version protection.
 
 -   **Key Features**:
-    -   **9 Optimization Profiles**:
+    -   **12 Optimization Profiles**:
         | Profile | Use Case |
         |---------|----------|
-        | Balanced | General purpose (recommended) |
-        | Aggressive | High concurrency / High PPS |
-        | Aggressive Safe | Recommended aggressive config |
-        | Xray/Hy2 Dedicated | Proxy server optimization |
-        | Low Memory (1C/1G) | Small memory VPS |
-        | Low Memory (2C/2G) | Medium config VPS |
-        | High Bandwidth (1G) | Gigabit physical NIC |
-        | High Bandwidth (10G) | 10 Gigabit physical NIC |
-        | **VPS Max Bandwidth** | Virtual NIC max throughput |
+        | **Balanced** | General purpose (Recommended) |
+        | **Aggressive** | High Concurrency / High PPS |
+        | **Aggressive Safe** | Balanced Aggressive (Stable) |
+        | **UDP/QUIC** | QUIC / Hysteria2 / TUIC Optimization |
+        | **Streaming** | VLESS / Reality TCP Optimization |
+        | **HTTP Proxy** | Squid / Nginx / Clutch Proxy Optimization |
+        | **Low Memory (1C/1G)** | Small RAM VPS (Prevent OOM) |
+        | **Low Memory (2C/2G)** | Medium RAM VPS |
+        | **High Bandwidth (1G)** | 1Gbps Physical NIC |
+        | **High Bandwidth (10G)** | 10Gbps Physical NIC |
+        | **VPS Max Bandwidth** | Virtual NIC Max Throughput |
+        | **Anti-Bufferbloat** | **(Recommended)** Fix Packet Loss/Lag |
     -   **BBR v3 Support**: Integrated Joey BBR project for one-click installation and management of high-performance BBR v3 kernels.
     -   **Queue Algorithm Management**: Supports FQ, FQ_CODEL, FQ_PIE, CAKE and more queue algorithms.
     -   **Security Mechanism**: Features conflict detection, permanent pristine backup, and history snapshots for easy rollback.
