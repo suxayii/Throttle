@@ -1477,8 +1477,8 @@ view_current_rules(){
 
   # 使用 awk 预处理：去重（最后写入生效）、去除注释空行
   # output format: key=value
-  local effective_conf
-  effective_conf="$(awk '
+  local effective_conf awk_src
+  awk_src='
     BEGIN { FS="=" }
     /^[[:space:]]*#/ { next }
     /^[[:space:]]*$/ { next }
@@ -1491,9 +1491,6 @@ view_current_rules(){
       
       if (key != "" && val != "") {
         conf[key] = val
-        # Maintain order in keys array is hard in standard awk (associative arrays are unordered)
-        # We will iterate file again or just use "sort" if order generally doesn't matter for display?
-        # Better: keep an ordered list of keys found
         if (!(key in seen)) {
             keys[++k] = key
             seen[key] = 1
@@ -1505,7 +1502,8 @@ view_current_rules(){
         print keys[i] "=" conf[keys[i]]
       }
     }
-  ' "$config_file")"
+  '
+  effective_conf="$(awk "$awk_src" "$config_file")"
 
   while IFS='=' read -r key val; do
     # Get system value
