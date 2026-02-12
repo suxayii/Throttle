@@ -1478,7 +1478,9 @@ view_current_rules(){
   # 使用 awk 预处理：去重（最后写入生效）、去除注释空行
   # output format: key=value
   local effective_conf awk_src
-  awk_src='
+  # Use read to load awk script into variable safe from quoting issues
+  # || true is needed because read returns 1 when it hits EOF without delimiter
+  read -r -d '' awk_src <<'AWK_EOF' || true
     BEGIN { FS="=" }
     /^[[:space:]]*#/ { next }
     /^[[:space:]]*$/ { next }
@@ -1502,7 +1504,7 @@ view_current_rules(){
         print keys[i] "=" conf[keys[i]]
       }
     }
-  '
+AWK_EOF
   effective_conf="$(awk "$awk_src" "$config_file")"
 
   while IFS='=' read -r key val; do
