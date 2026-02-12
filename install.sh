@@ -1,4 +1,4 @@
-cat > /root/net-tune-pro-v3-zh.sh <<'EOF'
+cat > /tmp/net-tune-pro-v3-zh.sh.tmp <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -241,6 +241,29 @@ net.ipv4.tcp_sack = 1
 CONF
 }
 
+profile_peak_jitter(){ cat <<'CONF'
+# ---- 方案：晚高峰抗抖动版 (Anti-Bufferbloat) ----
+# 针对晚高峰丢包严重/延迟抖动场景
+# 核心策略：大幅减小缓冲区，避免 Bufferbloat，牺牲极限吞吐换取稳定性
+# BDP (100Mbps, 200ms) ~= 2.5MB. 设置 8MB 也就是足够 300Mbps+
+net.core.netdev_max_backlog = 8192
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.rmem_max = 8388608
+net.core.wmem_max = 8388608
+net.ipv4.tcp_rmem = 4096 87380 8388608
+net.ipv4.tcp_wmem = 4096 65536 8388608
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+CONF
+}
+
 profile_streaming(){ cat <<'CONF'
 # ---- 方案：流媒体代理版（VLESS/Reality TCP 优化） ----
 # 针对 Netflix/YouTube/TikTok 等视频流媒体场景
@@ -308,6 +331,7 @@ emit_profile(){
     bw_1g) profile_bw_1g ;;
     bw_10g) profile_bw_10g ;;
     vps_max) profile_vps_max ;;
+    peak_jitter) profile_peak_jitter ;;
     *) return 1 ;;
   esac
 }
@@ -1401,6 +1425,74 @@ system_optimize_menu(){
   done
 }
 
+view_current_rules(){
+  echo
+  echo -e "${BOLD}【当前优化规则校验】${NC}"
+  line
+  
+  local config_file="$ACTIVE_FILE"
+  if [[ ! -f "$config_file" ]]; then
+    warn "未找到托管配置文件：$config_file"
+    read -rp "是否查看 /etc/sysctl.conf ? [y/N]: " yn
+    if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
+       config_file="/etc/sysctl.conf"
+    else
+       return
+    fi
+  fi
+
+  echo "配置文件：$config_file"
+  printf "${BOLD}%-32s %-20s %-20s %s${NC}\n" "参数键 (Key)" "配置 (Conf)" "系统 (Sys)" "状态"
+  line
+
+  while IFS= read -r line; do
+    # Strip comments and whitespace, and remove CR (\r) for Windows comp
+    line="${line%%#*}"
+    line="$(echo "$line" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    
+    [[ -z "$line" ]] && continue
+    # Skip if not key=value
+    [[ "$line" != *"="* ]] && continue
+    
+    local key="${line%%=*}"
+    local val="${line#*=}"
+    
+    # Trim key and val
+    key="$(echo "$key" | sed -e 's/[[:space:]]*$//')"
+    val="$(echo "$val" | sed -e 's/^[[:space:]]*//')"
+    
+    # Get system value
+    local sys_val
+    sys_val="$(sysctl -n "$key" 2>/dev/null || echo "MISSING")"
+    
+    # Normalize for comparison (collapse spaces)
+    local clean_val clean_sys
+    clean_val="$(echo "$val" | tr -s ' ')"
+    clean_sys="$(echo "$sys_val" | tr -s ' ')"
+    
+    local status
+    if [[ "$sys_val" == "MISSING" ]]; then
+        status="${RED}MISSING${NC}"
+    elif [[ "$clean_val" == "$clean_sys" ]]; then
+        status="${GREEN}OK${NC}"
+    else
+        status="${YELLOW}DIFF${NC}"
+    fi
+    
+    # Truncate values for display if too long
+    local d_val="$val"
+    local d_sys="$sys_val"
+    if (( ${#d_val} > 20 )); then d_val="${d_val:0:18}.."; fi
+    if (( ${#d_sys} > 20 )); then d_sys="${d_sys:0:18}.."; fi
+    
+    printf "%-32s %-20s %-20s %b\n" "$key" "$d_val" "$d_sys" "$status"
+
+  done < "$config_file"
+  line
+  echo "注：DIFF 表示系统实际运行值与配置文件不一致"
+  pause
+}
+
 # ===================== 脚本更新 =====================
 update_script(){
   echo
@@ -1471,9 +1563,10 @@ choose_profile_menu(){
     echo "9) 高带宽版（1G口）"
     echo "10) 高带宽版（10G口）"
     echo "11) VPS 极致带宽版（虚拟网卡）"
+    echo "12) 晚高峰抗抖动版 (Anti-Bufferbloat) [推荐]"
     echo "0) 返回"
     line
-    read -rp "请输入选项 [0-11]: " c
+    read -rp "请输入选项 [0-12]: " c
 
     case "$c" in
       1) p="balanced"; p_name="平衡版（通用推荐）" ;;
@@ -1487,6 +1580,7 @@ choose_profile_menu(){
       9) p="bw_1g"; p_name="高带宽版（1G口）" ;;
       10) p="bw_10g"; p_name="高带宽版（10G口）" ;;
       11) p="vps_max"; p_name="VPS 极致带宽版（虚拟网卡）" ;;
+      12) p="peak_jitter"; p_name="晚高峰抗抖动版 (Anti-Bufferbloat)" ;;
       0) return ;;
       *) warn "无效输入"; sleep 1; continue ;;
     esac
@@ -1558,6 +1652,7 @@ main_menu(){
     echo "12) 网卡/系统级深度优化 (Virtio/GRO)"
     echo "13) Swap 优化（关闭/降低 swappiness）"
     echo "14) 更新脚本"
+    echo "15) 查看当前优化规则"
     echo "0) 退出"
     line
     read -rp "请输入选项: " ch
@@ -1584,6 +1679,7 @@ main_menu(){
       12) system_optimize_menu ;;
       13) optimize_swap; pause ;;
       14) update_script; pause ;;
+      15) view_current_rules ;;
       0) ok "已退出"; exit 0 ;;
       *) warn "无效输入"; sleep 1 ;;
     esac
@@ -1595,5 +1691,6 @@ check_base_deps
 main_menu
 EOF
 
+mv -f /tmp/net-tune-pro-v3-zh.sh.tmp /root/net-tune-pro-v3-zh.sh
 chmod +x /root/net-tune-pro-v3-zh.sh
 bash /root/net-tune-pro-v3-zh.sh
