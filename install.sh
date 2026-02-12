@@ -91,8 +91,6 @@ net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 20
 net.ipv4.ip_local_port_range = 10240 65535
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_slow_start_after_idle = 0
 CONF
 }
@@ -370,6 +368,33 @@ validate_profile_semantics(){
   tw="$(extract_max_from_triplet "$tcp_wmem")"
   [[ -n "$rmem_max" && -n "$tr" ]] && (( rmem_max < tr )) && { err "参数校验失败：rmem_max < tcp_rmem 最大值"; return 1; }
   [[ -n "$wmem_max" && -n "$tw" ]] && (( wmem_max < tw )) && { err "参数校验失败：wmem_max < tcp_wmem 最大值"; return 1; }
+  
+  # [NEW] 硬件限制检测与调整
+  local total_mem_kb
+  total_mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  
+  # 简单策略：单 Socket 最大缓冲区不应超过物理内存的 1/4 (避免 OOM)
+  local max_allowed_kb=$(( total_mem_kb / 4 ))
+  local rmem_max_kb=$(( rmem_max / 1024 ))
+  local wmem_max_kb=$(( wmem_max / 1024 ))
+  
+  if (( total_mem_kb > 0 )); then
+    if (( rmem_max_kb > max_allowed_kb )); then
+        warn "检测到 rmem_max ($((rmem_max/1024/1024))MB) 超过系统建议值 ($((max_allowed_kb/1024))MB)"
+        info "已自动调整 rmem_max 为安全值..."
+        sed -i "s/^net.core.rmem_max.*/net.core.rmem_max = $((max_allowed_kb * 1024))/" "$tmp"
+        # 同时调整 tcp_rmem 最大值
+        sed -i "s/^net.ipv4.tcp_rmem.*/net.ipv4.tcp_rmem = 4096 87380 $((max_allowed_kb * 1024))/" "$tmp"
+    fi
+    if (( wmem_max_kb > max_allowed_kb )); then
+        warn "检测到 wmem_max ($((wmem_max/1024/1024))MB) 超过系统建议值 ($((max_allowed_kb/1024))MB)"
+        info "已自动调整 wmem_max 为安全值..."
+        sed -i "s/^net.core.wmem_max.*/net.core.wmem_max = $((max_allowed_kb * 1024))/" "$tmp"
+        # 同时调整 tcp_wmem 最大值
+        sed -i "s/^net.ipv4.tcp_wmem.*/net.ipv4.tcp_wmem = 4096 65536 $((max_allowed_kb * 1024))/" "$tmp"
+    fi
+  fi
+
   return 0
 }
 
@@ -799,6 +824,13 @@ apply_profile(){
   echo "$p" > "$PROFILE_STATE_FILE"
   ok "方案已应用：$p"
   log "APPLY profile=$p success"
+
+  # [NEW] 自动修复 BBR 未开启的问题
+  if [[ ! -f "$BBR_SYSCTL_FILE" ]]; then
+      warn "检测到 BBR 配置文件 ($BBR_SYSCTL_FILE) 不存在"
+      info "正在自动启用 BBR + FQ (默认推荐)..."
+      bbr_qdisc_apply "bbr" "fq" || true
+  fi
 }
 
 # ===================== BBR 功能（中文） =====================
@@ -1432,17 +1464,43 @@ system_optimize_menu(){
   echo "1) 应用优化（临时生效，重启失效）"
   echo "2) 应用优化并设置开机自启 (rc.local)"
   echo "3) 还原默认配置"
+  echo "4) 强制清除所有限速规则 (tc qdisc clean)"
   echo "0) 返回主菜单"
   line
   read -rp "请输入选项: " choice
   case "$choice" in
-    1) apply_system_optimizations "temp"; pause ;;
     2) apply_system_optimizations "persist"; pause ;;
     3) restore_system_optimizations; pause ;;
+    4) clear_tc_rules; pause ;;
     0) return ;;
     *) warn "无效选择" ;;
   esac
   done
+}
+
+clear_tc_rules(){
+  echo
+  echo -e "${BOLD}【清除流量控制 (Traffic Control) 规则】${NC}"
+  line
+  
+  local nic
+  nic="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+  [[ -z "$nic" ]] && nic="eth0"
+  
+  info "正在清除网卡 $nic 上的排队规则 (qdisc)..."
+  tc qdisc del dev "$nic" root 2>/dev/null
+  
+  info "正在清除 iptables 可能的流量标记 (mangle 表)..."
+  iptables -t mangle -F OUTPUT 2>/dev/null
+  
+  # 重新应用 fq (BBR 推荐)
+  info "重新应用 BBR 推荐队列 (fq)..."
+  sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+  tc qdisc add dev "$nic" root fq 2>/dev/null || true
+  
+  echo
+  ok "已清除所有限速/整形规则，并重置为 fq。"
+  echo "注意：如果是 Throttle.sh 残留的 limit，现在已被移除。"
 }
 
 view_current_rules(){
@@ -1514,8 +1572,8 @@ AWK_EOF
     
     # Normalize for comparison: collapse multiple spaces/tabs into single space
     local clean_val clean_sys
-    clean_val="$(echo "$val" | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    clean_sys="$(echo "$sys_val" | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    clean_val="$(echo "$val" | tr '\t' ' ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    clean_sys="$(echo "$sys_val" | tr '\t' ' ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
     local status
     if [[ "$sys_val" == "MISSING" ]]; then
