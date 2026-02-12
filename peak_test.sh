@@ -44,14 +44,24 @@ bandwidth_check() {
     local nic=$1
     local rx1=$(cat /sys/class/net/$nic/statistics/rx_bytes)
     local tx1=$(cat /sys/class/net/$nic/statistics/tx_bytes)
+    local drop1=$(cat /sys/class/net/$nic/statistics/rx_dropped 2>/dev/null || echo 0)
     sleep 1
     local rx2=$(cat /sys/class/net/$nic/statistics/rx_bytes)
     local tx2=$(cat /sys/class/net/$nic/statistics/tx_bytes)
+    local drop2=$(cat /sys/class/net/$nic/statistics/rx_dropped 2>/dev/null || echo 0)
 
     local rx_speed=$(( (rx2 - rx1) / 1024 ))
     local tx_speed=$(( (tx2 - tx1) / 1024 ))
+    local drop_diff=$(( drop2 - drop1 ))
 
     log "实时流量: RX=${rx_speed}KB/s TX=${tx_speed}KB/s"
+    if (( drop_diff > 0 )); then
+        echo -e "${RED}严重警告: 检测到网卡丢包增长 (RX_dropped +${drop_diff}/s)${PLAIN}"
+        log "WARNING: RX_dropped increased by ${drop_diff}"
+        echo -e "${YELLOW}建议运行 install.sh -> 12) 网卡/系统级深度优化 以增加 Ring Buffer${PLAIN}"
+    else
+        echo -e "${GREEN}丢包监控: 正常 (无新增丢包)${PLAIN}"
+    fi
 }
 
 ping_test() {
@@ -59,15 +69,27 @@ ping_test() {
     local desc=$2
 
     local res=$(ping -c 20 -i 0.2 -q "$ip" 2>/dev/null)
-    if [ $? -ne 0 ]; then
+    # 退出码非0 或 找不到 rtt 行（说明100%丢失）
+    if [ $? -ne 0 ] || ! echo "$res" | grep -q "rtt"; then
         echo "100 999 999"
         return
     fi
 
-    local loss=$(echo "$res" | grep -oP '\d+(?=% packet loss)')
+    # 使用 awk 提取丢包率，兼容性更好
+    local loss=$(echo "$res" | awk -F', ' '/packet loss/ {print $3}' | awk '{print $1}' | tr -d '%')
+    # 备用提取逻辑
+    if [[ -z "$loss" ]]; then
+       loss=$(echo "$res" | grep -oE '[0-9]+% packet loss' | awk '{print $1}' | tr -d '%')
+    fi
+
     local rtt=$(echo "$res" | grep "rtt")
     local avg=$(echo "$rtt" | awk -F'/' '{print $5}')
     local mdev=$(echo "$rtt" | awk -F'/' '{print $7}' | awk '{print $1}')
+    
+    # 防止空值导致后续计算报错
+    [[ -z "$loss" ]] && loss=100
+    [[ -z "$avg" ]] && avg=999
+    [[ -z "$mdev" ]] && mdev=999
 
     echo "$loss $avg $mdev"
 }
