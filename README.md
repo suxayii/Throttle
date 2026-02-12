@@ -108,6 +108,25 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 
 ---
 
+## 🛠️ 诊断工具
+
+### 晚高峰网络诊断 (`peak_test.sh`)
+专为诊断晚高峰时段网络拥塞、丢包和延迟抖动设计。
+
+-   **功能**：
+    -   系统负载与网卡丢包检测
+    -   关键节点 Ping 测试 (阿里云/腾讯云/Cloudflare/Google)
+    -   路由跳数简易测试
+
+**使用方法**：
+```bash
+# 下载并运行
+wget -O peak_test.sh https://raw.githubusercontent.com/suxayii/Throttle/master/peak_test.sh && chmod +x peak_test.sh && ./peak_test.sh
+```
+
+---
+
+
 ## 📋 系统要求
 
 -   **操作系统**: Debian 10+, Ubuntu 20.04+, CentOS 7+
