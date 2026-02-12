@@ -4,6 +4,7 @@ set -euo pipefail
 
 # ===================== 基础路径 =====================
 ACTIVE_FILE="/etc/sysctl.d/99-net-tune-pro-v3.conf"            # 网络方案托管文件
+PROFILE_STATE_FILE="/etc/net-tune-pro-profile-name"            # 当前应用方案名称记录
 BBR_SYSCTL_FILE="/etc/sysctl.d/99-joeyblog.conf"               # BBR/QDISC托管文件
 MODULES_CONF="/etc/modules-load.d/joeyblog-qdisc.conf"         # qdisc模块自动加载
 BACKUP_DIR="/root/sysctl-backups-v3"
@@ -333,6 +334,24 @@ emit_profile(){
     vps_max) profile_vps_max ;;
     peak_jitter) profile_peak_jitter ;;
     *) return 1 ;;
+  esac
+}
+
+get_profile_name(){
+  case "$1" in
+    balanced) echo "平衡版（通用推荐）" ;;
+    aggressive) echo "激进版（高并发/高PPS）" ;;
+    aggressive_safe) echo "激进稳妥版（推荐）" ;;
+    udp_quic) echo "UDP 专项版（QUIC/UDP 优化）" ;;
+    streaming) echo "流媒体代理版（VLESS/Reality TCP）" ;;
+    http_proxy) echo "HTTP 代理专项版（Squid/Nginx/Clash）" ;;
+    low_1c1g) echo "低内存保守版（1C/1G）" ;;
+    low_2c2g) echo "低内存保守版（2C/2G）" ;;
+    bw_1g) echo "高带宽版（1G口）" ;;
+    bw_10g) echo "高带宽版（10G口）" ;;
+    vps_max) echo "VPS 极致带宽版（虚拟网卡）" ;;
+    peak_jitter) echo "晚高峰抗抖动版 (Anti-Bufferbloat)" ;;
+    *) echo "未知方案 ($1)" ;;
   esac
 }
 
@@ -777,6 +796,7 @@ apply_profile(){
   fi
 
   CURRENT_PROFILE="$p"
+  echo "$p" > "$PROFILE_STATE_FILE"
   ok "方案已应用：$p"
   log "APPLY profile=$p success"
 }
@@ -1430,6 +1450,16 @@ view_current_rules(){
   echo -e "${BOLD}【当前优化规则校验】${NC}"
   line
   
+  # 获取并显示当前 Profile 名称
+  local p_code p_desc
+  if [[ -f "$PROFILE_STATE_FILE" ]]; then
+    p_code="$(cat "$PROFILE_STATE_FILE" | tr -d ' \n\r')"
+    p_desc="$(get_profile_name "$p_code")"
+    echo "当前应用方案：${GREEN}${p_desc}${NC}"
+  else
+    echo "当前应用方案：${YELLOW}未知 (未检测到状态文件)${NC}"
+  fi
+
   local config_file="$ACTIVE_FILE"
   if [[ ! -f "$config_file" ]]; then
     warn "未找到托管配置文件：$config_file"
@@ -1441,35 +1471,52 @@ view_current_rules(){
     fi
   fi
 
-  echo "配置文件：$config_file"
+  echo "配置文件路径：$config_file"
   printf "${BOLD}%-32s %-20s %-20s %s${NC}\n" "参数键 (Key)" "配置 (Conf)" "系统 (Sys)" "状态"
   line
 
-  while IFS= read -r line; do
-    # Strip comments and whitespace, and remove CR (\r) for Windows comp
-    line="${line%%#*}"
-    line="$(echo "$line" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    
-    [[ -z "$line" ]] && continue
-    # Skip if not key=value
-    [[ "$line" != *"="* ]] && continue
-    
-    local key="${line%%=*}"
-    local val="${line#*=}"
-    
-    # Trim key and val
-    key="$(echo "$key" | sed -e 's/[[:space:]]*$//')"
-    val="$(echo "$val" | sed -e 's/^[[:space:]]*//')"
-    
+  # 使用 awk 预处理：去重（最后写入生效）、去除注释空行
+  # output format: key=value
+  local effective_conf
+  effective_conf="$(awk '
+    BEGIN { FS="=" }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    {
+      # Normalize key: trim spaces
+      key=$1; gsub(/^[ \t]+|[ \t]+$/, "", key)
+      
+      # Normalize val: trim spaces, remove inline comments
+      val=$2; sub(/#.*/, "", val); gsub(/^[ \t]+|[ \t]+$/, "", val)
+      
+      if (key != "" && val != "") {
+        conf[key] = val
+        # Maintain order in keys array is hard in standard awk (associative arrays are unordered)
+        # We will iterate file again or just use "sort" if order generally doesn't matter for display?
+        # Better: keep an ordered list of keys found
+        if (!(key in seen)) {
+            keys[++k] = key
+            seen[key] = 1
+        }
+      }
+    }
+    END {
+      for (i=1; i<=k; i++){
+        print keys[i] "=" conf[keys[i]]
+      }
+    }
+  ' "$config_file")"
+
+  while IFS='=' read -r key val; do
     # Get system value
     local sys_val
     sys_val="$(sysctl -n "$key" 2>/dev/null || echo "MISSING")"
     
-    # Normalize for comparison (collapse spaces)
+    # Normalize for comparison: collapse multiple spaces/tabs into single space
     local clean_val clean_sys
-    clean_val="$(echo "$val" | tr -s ' ')"
-    clean_sys="$(echo "$sys_val" | tr -s ' ')"
-    
+    clean_val="$(echo "$val" | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    clean_sys="$(echo "$sys_val" | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
     local status
     if [[ "$sys_val" == "MISSING" ]]; then
         status="${RED}MISSING${NC}"
@@ -1487,9 +1534,9 @@ view_current_rules(){
     
     printf "%-32s %-20s %-20s %b\n" "$key" "$d_val" "$d_sys" "$status"
 
-  done < "$config_file"
+  done <<< "$effective_conf"
   line
-  echo "注：DIFF 表示系统实际运行值与配置文件不一致"
+  echo "注：DIFF 表示系统实际运行值与配置文件不一致 (忽略空白符差异)"
   pause
 }
 
