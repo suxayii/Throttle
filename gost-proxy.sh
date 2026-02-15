@@ -756,7 +756,130 @@ add_proxy_node() {
     fi
 }
 
+
+add_forwarding_rule() {
+    echo ""
+    echo -e "${BLUE}═══════════════ 添加流量转发规则 ═══════════════${NC}"
+    echo ""
+
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        log_error "未找到 GOST 服务配置，请先安装"
+        return 1
+    fi
+
+    # 1. 本地监听端口
+    while true; do
+        read -p "设置本地监听端口 (例如 8080): " LOCAL_PORT
+        if [[ -z "$LOCAL_PORT" ]]; then
+            log_error "端口不能为空"
+            continue
+        fi
+        
+        local status=0
+        check_port_occupied "$LOCAL_PORT" "verbose" || status=$?
+        
+        if [[ $status -eq 1 ]]; then
+             break
+        elif [[ $status -eq 2 ]]; then
+             read -p "端口被旧的 GOST 服务占用，是否继续? [Y/n]: " confirm
+             [[ "$confirm" =~ ^[Nn]$ ]] || break
+        else
+            read -p "端口被其他程序占用，可能导致启动失败。是否继续? [y/N]: " confirm
+            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                break
+            fi
+        fi
+    done
+
+    # 2. 本地监听IP
+    echo "设置本地监听 IP:"
+    echo "  1) 监听所有 IP (0.0.0.0, 默认)"
+    echo "  2) 指定 IP"
+    read -p "请输入 [1-2]: " BIND_CHOICE
+    
+    local LOCAL_BIND=""
+    if [[ "$BIND_CHOICE" == "2" ]]; then
+        read -p "请输入要监听的 IP: " LOCAL_IP
+        LOCAL_BIND="$LOCAL_IP"
+    fi
+
+    # 3. 目标地址
+    while true; do
+        read -p "设置目标 IP (例如 1.1.1.1): " DEST_IP
+        if [[ -z "$DEST_IP" ]]; then
+             log_error "目标 IP 不能为空"
+             continue
+        fi
+        break
+    done
+
+    while true; do
+        read -p "设置目标端口 (例如 80): " DEST_PORT
+        if [[ -z "$DEST_PORT" ]]; then
+             log_error "目标端口不能为空"
+             continue
+        fi
+        break
+    done
+
+    # 4. 协议选择
+    echo "请选择转发协议:"
+    echo "  1) TCP Only"
+    echo "  2) UDP Only"
+    echo "  3) TCP + UDP"
+    read -p "请输入 [1-3]: " PROTO_CHOICE
+    
+    local forward_path="/${DEST_IP}:${DEST_PORT}"
+    local new_args=""
+    
+    # 构造 args
+    # 格式: -L protocol://[bind_ip]:port/remote_ip:remote_port
+    
+    case "$PROTO_CHOICE" in
+        1)
+            new_args="-L 'tcp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}'"
+            ;;
+        2)
+            new_args="-L 'udp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}'"
+            ;;
+        3)
+            new_args="-L 'tcp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}' -L 'udp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}'"
+            ;;
+        *)
+            log_warn "无效选择，默认使用 TCP"
+            new_args="-L 'tcp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}'"
+            ;;
+    esac
+
+    # 5. 追加到 Service 文件
+    # 使用 awk 将新参数追加到 ExecStart 末尾
+    cp "$SERVICE_FILE" "${SERVICE_FILE}.bak"
+    local output=$(grep "^ExecStart=" "$SERVICE_FILE")
+    local current_cmd=${output#ExecStart=}
+    local new_cmd="${current_cmd} ${new_args}"
+    
+    awk -v new="$new_cmd" '/^ExecStart=/ {$0="ExecStart=" new} 1' "${SERVICE_FILE}.bak" > "$SERVICE_FILE"
+    
+    log_info "已添加转发规则: 本地 ${LOCAL_BIND:-*}:${LOCAL_PORT} -> 目标 ${DEST_IP}:${DEST_PORT}"
+    
+    systemctl daemon-reload
+    if systemctl restart gost; then
+        echo ""
+        log_info "服务已重启，转发规则已生效！"
+        show_proxy_info
+    else
+        echo ""
+        log_error "服务启动失败！正在回滚..."
+        mv "${SERVICE_FILE}.bak" "$SERVICE_FILE"
+        systemctl daemon-reload
+        systemctl restart gost
+        log_info "已恢复原有配置。"
+        return 1
+    fi
+}
+
 manage_paused_proxies() {
+
     init_config_dir
     
     while true; do
@@ -1016,17 +1139,33 @@ show_proxy_info() {
             auth="$user:$pass"
         fi
         
-        # 提取端口
-        local port=$(echo "$proxy_url" | grep -oE ":([0-9]+)\?" | tr -d ':?')
-        [[ -z "$port" ]] && port=$(echo "$proxy_url" | grep -oE ":([0-9]+)'" | tr -d ":'" )
-        [[ -z "$port" ]] && port=$(echo "$proxy_url" | grep -oE ":([0-9]+)$" | tr -d ':')
+        # 提取目标地址 (转发模式)
+        # 格式: schema://[user:pass@][host]:port/target_addr:target_port
+        local target=""
+        # 匹配 /ip:port 结尾
+        if [[ "$proxy_url" =~ /([^/]+:[0-9]+)$ ]]; then
+            target="${BASH_REMATCH[1]}"
+        fi
         
+        # 提取本地端口
+        # 移除 scheme
+        local temp_url=${proxy_url#*://}
+        # 移除 auth
+        temp_url=${temp_url#*@}
+        # 截取 host:port 部分 (去掉可能的 path)
+        local listen_part=${temp_url%%/*}
+        # 截取端口 (最后冒号后的部分)
+        local port=${listen_part##*:}
+
         echo ""
         echo -e "  ${GREEN}[$proxy_count]${NC} 协议: ${YELLOW}$proto${NC}"
-        echo -e "      端口: ${YELLOW}${port:-未知}${NC}"
+        echo -e "      本地监听: ${YELLOW}${port:-未知}${NC}"
+        if [[ -n "$target" ]]; then
+            echo -e "      转发目标: ${YELLOW}$target${NC}"
+        fi
         if [[ -n "$auth" ]]; then
             echo -e "      认证: ${YELLOW}$auth${NC}"
-        else
+        elif [[ -z "$target" ]]; then
             echo -e "      认证: ${YELLOW}无${NC}"
         fi
         
@@ -1067,9 +1206,10 @@ show_menu() {
     echo "  4) 查看代理配置"
     echo "  5) 修改代理配置"
     echo "  6) 添加新代理节点 (多端口)"
-    echo "  7) BBR & TCP 网络优化"
-    echo "  8) 管理暂停的代理"
-    echo "  9) 更新脚本"
+    echo "  7) 添加流量转发规则 (TCP/UDP)"
+    echo "  8) BBR & TCP 网络优化"
+    echo "  9) 管理暂停的规则 (代理/转发)"
+    echo "  10) 更新脚本"
     echo "  0) 退出"
     echo ""
     read -p "请输入 [0-9]: " choice
@@ -1123,17 +1263,23 @@ show_menu() {
             ;;
         7)
             check_root
-            optimize_network
+            add_forwarding_rule
             read -p "按任意键返回主菜单..."
             show_menu
             ;;
         8)
             check_root
-            manage_paused_proxies
+            optimize_network
             read -p "按任意键返回主菜单..."
             show_menu
             ;;
         9)
+            check_root
+            manage_paused_proxies
+            read -p "按任意键返回主菜单..."
+            show_menu
+            ;;
+        10)
             update_script
             ;;
         0)
