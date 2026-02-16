@@ -14,6 +14,7 @@
   - [2. 端口限速工具 (Throttle.sh)](#2-端口限速工具-throttlesh)
   - [3. BBR 网络优化脚本 (bbr.sh)](#3-bbr-网络优化脚本-bbrsh)
   - [4. GOST 代理部署脚本 (gost-proxy.sh)](#4-gost-代理部署脚本-gost-proxysh)
+  - [5. NAT 专用优化脚本 (nat_optimize.sh)](#5-nat-专用优化脚本-nat_optimizesh)
 - [🚀 快速开始](#-快速开始)
 - [📋 系统要求](#-系统要求)
 - [🤝 贡献与反馈](#-贡献与反馈)
@@ -69,9 +70,21 @@
 极简的 GOST 隧道/代理服务 (v2.0) 部署工具。
 
 -   **核心功能**：
-    -   **多协议支持**：轻松部署 SOCKS5、HTTP 及其混合协议。
+    -   **多协议支持**：轻松部署 SOCKS5、HTTP 及其混合协议，**新增 SSTP VPN 支持**。
     -   **多节点管理**：支持同时运行多个独立代理节点，独立配置认证信息。
+    -   **智能冲突检测**：内置端口冲突检测，防止端口占用导致服务启动失败。
+    -   **流量转发**：支持 TCP/UDP 端口转发配置。
     -   **自动守护**：自动配置 Systemd 服务，确保代理进程稳定在线。
+
+### 5. NAT 专用优化脚本 (`nat_optimize.sh`)
+专为 NAT 转发服务器设计的深度优化工具，特别适配 **LXC/Docker 容器环境**。
+
+-   **核心功能**：
+    -   **容器友好**：自动识别虚拟化环境，兼容只读内核参数，LXC/Proxmox 下稳定运行。
+    -   **智能连接跟踪**：根据内存自动计算 `nf_conntrack_max`，防止高并发丢包。
+    -   **激进连接回收**：缩短 TCP/UDP 超时时间，加速连接表释放，适合大量短连接场景。
+    -   **BBR/队列优化**：自动启用 BBR + FQ，优化 UDP 缓冲区以支持 QUIC/Hysteria。
+    -   **网卡/系统调优**：自动调整 Ring Buffer、启用多队列 RSS、安装 irqbalance 及提升文件描述符限制。
 
 ---
 
@@ -107,6 +120,11 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 #### 4. GOST 代理部署
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
+```
+
+#### 5. NAT 专用优化 (LXC/容器推荐)
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nat_optimize.sh)
 ```
 
 ---
