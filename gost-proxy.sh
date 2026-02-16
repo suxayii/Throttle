@@ -49,6 +49,64 @@ check_dependencies() {
     done
 }
 
+validate_port() {
+    local port=$1
+    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+        log_error "端口必须为数字"
+        return 1
+    fi
+    if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then
+        log_error "端口范围必须在 1-65535 之间"
+        return 1
+    fi
+    return 0
+}
+
+# 对字符串进行 sed 转义，防止特殊字符破坏替换
+sed_escape() {
+    printf '%s\n' "$1" | sed -e 's/[&/\|]/\\&/g'
+}
+
+# 从 gost 服务配置中提取所有已使用的端口
+get_gost_used_ports() {
+    local service_file="/etc/systemd/system/gost.service"
+    if [[ ! -f "$service_file" ]]; then
+        return
+    fi
+    local exec_line=$(grep "^ExecStart=" "$service_file" | sed 's/ExecStart=//')
+    if [[ -z "$exec_line" ]]; then
+        return
+    fi
+    # 从所有 -L 参数中提取端口号 (格式: protocol://[auth@][host]:port[?...])
+    echo "$exec_line" | grep -oP '(?<=-L\s)\S+' | while read -r url; do
+        # 移除 scheme
+        local temp=${url#*://}
+        # 移除 auth
+        temp=${temp#*@}
+        # 提取 host:port 部分 (去掉 path 和 query)
+        local listen=${temp%%[/?]*}
+        # 提取端口
+        local port=${listen##*:}
+        [[ -n "$port" && "$port" =~ ^[0-9]+$ ]] && echo "$port"
+    done
+}
+
+# 检查端口是否与 gost 已有配置冲突
+# 返回 0 = 有冲突, 1 = 无冲突
+check_gost_port_conflict() {
+    local port=$1
+    local used_ports=$(get_gost_used_ports)
+    if [[ -z "$used_ports" ]]; then
+        return 1
+    fi
+    if echo "$used_ports" | grep -qx "$port"; then
+        log_warn "端口 $port 已在 GOST 现有配置中使用！"
+        echo -e "      ${YELLOW}如果继续，gost 重启后会因端口重复绑定而失败。${NC}"
+        return 0
+    fi
+    return 1
+}
+
 check_port_occupied() {
     local port=$1
     local verbose=$2 # 传入 "verbose" 显示详细错误
@@ -59,6 +117,10 @@ check_port_occupied() {
         return 1
     fi
 
+    # 返回值约定 (注意与 bash 惯例相反，调用时需注意):
+    #   0 = 端口被占用 (非 gost 进程)
+    #   1 = 端口未被占用 (可用)
+    #   2 = 端口被 gost 自身占用
     local is_occ=1 # 1=未占用, 0=占用
     local proc_name=""
 
@@ -137,9 +199,9 @@ check_existing_installation() {
         return 0
     fi
     
-    # 情况2: 是我们脚本安装的 systemd 服务
-    if [[ -f "$SERVICE_FILE" ]] && systemctl is-active gost &>/dev/null; then
-        log_info "检测到已安装并运行的 GOST 服务 (systemd managed)。"
+    # 情况2: 是我们脚本安装的 systemd 服务 (运行中或已启用)
+    if [[ -f "$SERVICE_FILE" ]] && (systemctl is-active gost &>/dev/null || systemctl is-enabled gost &>/dev/null); then
+        log_info "检测到已安装的 GOST 服务 (systemd managed)。"
         # 脚本可以继续更新
         return 0
     fi
@@ -234,6 +296,13 @@ download_and_install() {
     log_info "正在解压安装..."
     tar -zxf "$tmp_dir/gost.tar.gz" -C "$tmp_dir"
     
+    # 验证解压后的二进制文件是否存在
+    if [[ ! -f "$tmp_dir/gost" ]]; then
+        log_error "解压后未找到 gost 二进制文件，tar 包结构可能已变化"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+    
     # 停止现有服务
     if systemctl is-active --quiet gost 2>/dev/null; then
         systemctl stop gost
@@ -264,12 +333,22 @@ configure_proxy() {
         read -p "设置端口 (默认 443): " PORT
         PORT=${PORT:-443}
         
+        if ! validate_port "$PORT"; then
+            continue
+        fi
+        
         local status=0
         check_port_occupied "$PORT" "verbose" || status=$?
         
         if [[ $status -eq 1 ]]; then
-            # 未占用
-            break
+            # 端口未被系统占用，但还需检查 gost 配置内部冲突
+            if check_gost_port_conflict "$PORT"; then
+                read -p "是否仍要使用此端口? [y/N]: " confirm
+                [[ "$confirm" =~ ^[Yy]$ ]] && break
+                log_info "请重新设置端口"
+            else
+                break
+            fi
         elif [[ $status -eq 2 ]]; then
             # 被 gost 占用
             read -p "端口被旧的 GOST 服务占用，是否继续覆盖? [Y/n]: " confirm
@@ -291,11 +370,27 @@ configure_proxy() {
             read -p "设置 HTTP 端口 (默认 8080): " PORT2
             PORT2=${PORT2:-8080}
             
+            if ! validate_port "$PORT2"; then
+                continue
+            fi
+            
+            # 检查是否与第一个端口相同
+            if [[ "$PORT2" == "$PORT" ]]; then
+                log_error "HTTP 端口不能与 SOCKS5 端口相同 ($PORT)"
+                continue
+            fi
+            
             local status=0
             check_port_occupied "$PORT2" "verbose" || status=$?
             
             if [[ $status -eq 1 ]]; then
-                break
+                if check_gost_port_conflict "$PORT2"; then
+                    read -p "是否仍要使用此端口? [y/N]: " confirm
+                    [[ "$confirm" =~ ^[Yy]$ ]] && break
+                    log_info "请重新设置端口"
+                else
+                    break
+                fi
             elif [[ $status -eq 2 ]]; then
                  read -p "端口被旧的 GOST 服务占用，是否继续覆盖? [Y/n]: " confirm
                  [[ "$confirm" =~ ^[Nn]$ ]] || break
@@ -314,9 +409,12 @@ configure_proxy() {
     echo ""
     read -p "是否启用认证? [y/N]: " ENABLE_AUTH
     if [[ "$ENABLE_AUTH" =~ ^[Yy]$ ]]; then
-        read -p "设置用户名: " USER
-        read -s -p "设置密码: " PASS
+        read -p "设置用户名: " PROXY_USER
+        read -s -p "设置密码: " PROXY_PASS
         echo ""
+    else
+        PROXY_USER=""
+        PROXY_PASS=""
     fi
     
     # 构建命令
@@ -325,20 +423,20 @@ configure_proxy() {
 
 build_command() {
     local auth_str=""
-    [[ -n "$USER" && -n "$PASS" ]] && auth_str="${USER}:${PASS}@"
+    [[ -n "$PROXY_USER" && -n "$PROXY_PASS" ]] && auth_str="${PROXY_USER}:${PROXY_PASS}@"
     
     case "$PROTO_CHOICE" in
         1) 
             PROTO="socks5"
-            CMD="gost -L '${PROTO}://${auth_str}:${PORT}?keepalive=true'"
+            CMD="gost -L ${PROTO}://${auth_str}:${PORT}?keepalive=true"
             ;;
         2) 
             PROTO="http"
-            CMD="gost -L '${PROTO}://${auth_str}:${PORT}?keepalive=true'"
+            CMD="gost -L ${PROTO}://${auth_str}:${PORT}?keepalive=true"
             ;;
         3) 
             PROTO="socks5+http"
-            CMD="gost -L 'socks5://${auth_str}:${PORT}?keepalive=true' -L 'http://${auth_str}:${PORT2}?keepalive=true'"
+            CMD="gost -L socks5://${auth_str}:${PORT}?keepalive=true -L http://${auth_str}:${PORT2}?keepalive=true"
             ;;
     esac
 }
@@ -381,15 +479,15 @@ show_result() {
     echo -e "  ${CYAN}协议:${NC} $PROTO"
     echo -e "  ${CYAN}端口:${NC} $PORT"
     [[ "$PROTO_CHOICE" == "3" ]] && echo -e "  ${CYAN}HTTP端口:${NC} $PORT2"
-    [[ -n "$USER" ]] && echo -e "  ${CYAN}认证:${NC} $USER:****"
+    [[ -n "$PROXY_USER" ]] && echo -e "  ${CYAN}认证:${NC} $PROXY_USER:****"
     echo ""
     echo -e "${YELLOW}═══════════════ 测试命令 ═══════════════${NC}"
     
-    if [[ -n "$USER" ]]; then
+    if [[ -n "$PROXY_USER" ]]; then
         if [[ "$PROTO_CHOICE" == "2" ]]; then
-            echo -e "curl -x http://${USER}:${PASS}@${public_ip}:${PORT} https://www.google.com"
+            echo -e "curl -x http://${PROXY_USER}:${PROXY_PASS}@${public_ip}:${PORT} https://www.google.com"
         else
-            echo -e "curl -x socks5://${USER}:${PASS}@${public_ip}:${PORT} https://www.google.com"
+            echo -e "curl -x socks5://${PROXY_USER}:${PROXY_PASS}@${public_ip}:${PORT} https://www.google.com"
         fi
     else
         if [[ "$PROTO_CHOICE" == "2" ]]; then
@@ -435,13 +533,10 @@ optimize_network() {
     
     log_info "正在应用网络优化配置..."
     
-    # 备份原配置
-    if [[ -f /etc/sysctl.conf ]]; then
-        cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%Y%m%d%H%M%S)
-        log_info "已备份原配置到 /etc/sysctl.conf.bak.*"
-    fi
+    # 使用 sysctl.d 目录写入drop-in配置，不覆盖原有 sysctl.conf
+    mkdir -p /etc/sysctl.d
     
-    cat > /etc/sysctl.conf << 'EOF'
+    cat > /etc/sysctl.d/99-gost-bbr.conf << 'EOF'
 # ========================================
 # BBR & TCP 网络优化配置
 # Generated by GOST 部署脚本
@@ -486,7 +581,6 @@ net.ipv6.conf.default.forwarding=1
 EOF
 
     # 应用配置
-    sysctl -p > /dev/null 2>&1
     sysctl --system > /dev/null 2>&1
     
     echo ""
@@ -528,11 +622,19 @@ modify_proxy() {
     local current_user=""
     local current_pass=""
     
-    # 解析协议
-    if [[ "$exec_line" =~ socks5:// ]]; then
+    # 解析协议 (取第一个 -L 的协议)
+    local first_url=$(echo "$exec_line" | grep -oP '(?<=-L\s)\S+' | head -1)
+    if [[ "$first_url" =~ ^socks5:// ]]; then
         current_proto="socks5"
-    elif [[ "$exec_line" =~ http:// ]]; then
+    elif [[ "$first_url" =~ ^http:// ]]; then
         current_proto="http"
+    fi
+    
+    # 检测是否为双协议模式
+    local is_dual=0
+    local proto_count=$(echo "$exec_line" | grep -oP '(?<=-L\s)\S+' | grep -cE '^(socks5|http)://')
+    if [[ $proto_count -ge 2 ]]; then
+        is_dual=1
     fi
     
     # 解析用户名密码
@@ -564,11 +666,21 @@ modify_proxy() {
                     break
                 fi
                 
+                if ! validate_port "$new_port"; then
+                    continue
+                fi
+                
                 local status=0
                 check_port_occupied "$new_port" "verbose" || status=$?
                 
                 if [[ $status -eq 1 ]]; then
-                    break
+                    if check_gost_port_conflict "$new_port"; then
+                        read -p "是否仍要使用此端口? [y/N]: " confirm
+                        [[ "$confirm" =~ ^[Yy]$ ]] && break
+                        log_info "请重新设置端口"
+                    else
+                        break
+                    fi
                 elif [[ $status -eq 2 ]]; then
                      read -p "端口被旧的 GOST 服务占用，是否继续覆盖? [Y/n]: " confirm
                      [[ "$confirm" =~ ^[Nn]$ ]] || break
@@ -596,18 +708,25 @@ modify_proxy() {
             local new_exec="$exec_line"
             
             if [[ -n "$new_user" && -n "$new_pass" ]]; then
+                # 对特殊字符转义
+                local esc_cur_user=$(sed_escape "$current_user")
+                local esc_cur_pass=$(sed_escape "$current_pass")
+                local esc_new_user=$(sed_escape "$new_user")
+                local esc_new_pass=$(sed_escape "$new_pass")
                 if [[ -n "$current_user" ]]; then
                     # 替换现有认证
-                    new_exec=$(echo "$exec_line" | sed -E "s|://${current_user}:${current_pass}@|://${new_user}:${new_pass}@|g")
+                    new_exec=$(echo "$exec_line" | sed -E "s|://${esc_cur_user}:${esc_cur_pass}@|://${esc_new_user}:${esc_new_pass}@|g")
                 else
                     # 添加认证
-                    new_exec=$(echo "$exec_line" | sed -E "s|://:([0-9]+)|://${new_user}:${new_pass}@:\1|g")
+                    new_exec=$(echo "$exec_line" | sed -E "s|://:([0-9]+)|://${esc_new_user}:${esc_new_pass}@:\1|g")
                 fi
                 log_info "认证已修改为: ${new_user}:****"
             else
                 # 移除认证
                 if [[ -n "$current_user" ]]; then
-                    new_exec=$(echo "$exec_line" | sed -E "s|://${current_user}:${current_pass}@|://|g")
+                    local esc_cur_user=$(sed_escape "$current_user")
+                    local esc_cur_pass=$(sed_escape "$current_pass")
+                    new_exec=$(echo "$exec_line" | sed -E "s|://${esc_cur_user}:${esc_cur_pass}@|://|g")
                 fi
                 log_info "认证已取消"
             fi
@@ -623,7 +742,12 @@ modify_proxy() {
             local new_proto="socks5"
             [[ "$proto_choice" == "2" ]] && new_proto="http"
             
-            local new_exec=$(echo "$exec_line" | sed -E "s|${current_proto}://|${new_proto}://|g")
+            if [[ $is_dual -eq 1 ]]; then
+                log_warn "当前为双协议模式，修改将应用于第一个节点的协议。"
+            fi
+            
+            # 只替换第一个匹配的协议，而不是全局替换
+            local new_exec=$(echo "$exec_line" | sed -E "0,/${current_proto}:\/\//s|${current_proto}://|${new_proto}://|")
             sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
             
             log_info "协议已修改为: $new_proto"
@@ -671,9 +795,10 @@ add_proxy_node() {
     echo "协议类型:"
     echo "  1) SOCKS5 (默认)"
     echo "  2) HTTP"
-    read -p "请输入 [1-2]: " PROTO_CHOICE
-    PROTO_CHOICE=${PROTO_CHOICE:-1}
-    [[ "$PROTO_CHOICE" == "2" ]] && NEW_PROTO="http" || NEW_PROTO="socks5"
+    local node_proto_choice
+    read -p "请输入 [1-2]: " node_proto_choice
+    node_proto_choice=${node_proto_choice:-1}
+    [[ "$node_proto_choice" == "2" ]] && NEW_PROTO="http" || NEW_PROTO="socks5"
     
     # 端口
     while true; do
@@ -682,12 +807,22 @@ add_proxy_node() {
             log_error "端口不能为空"
             continue
         fi
+        if ! validate_port "$NEW_PORT"; then
+            continue
+        fi
         
         local status=0
         check_port_occupied "$NEW_PORT" "verbose" || status=$?
         
         if [[ $status -eq 1 ]]; then
-            break
+            # 端口未被系统占用，检查 gost 配置内部冲突
+            if check_gost_port_conflict "$NEW_PORT"; then
+                read -p "是否仍要使用此端口? [y/N]: " confirm
+                [[ "$confirm" =~ ^[Yy]$ ]] && break
+                log_info "请重新设置端口"
+            else
+                break
+            fi
         elif [[ $status -eq 2 ]]; then
              read -p "端口被旧的 GOST 服务占用，是否继续? [Y/n]: " confirm
              [[ "$confirm" =~ ^[Nn]$ ]] || break
@@ -714,7 +849,7 @@ add_proxy_node() {
     fi
     
     # 2. 构造新参数
-    NEW_ARG="-L '${NEW_PROTO}://${NEW_AUTH}:${NEW_PORT}?keepalive=true'"
+    NEW_ARG="-L ${NEW_PROTO}://${NEW_AUTH}:${NEW_PORT}?keepalive=true"
     
     # 3. 读取当前 ExecStart (处理多行情况)
     # 注意：systemd service 文件中 ExecStart 可能很长。简单处理：假设在一行或者追加到最后。
@@ -774,11 +909,20 @@ add_forwarding_rule() {
             log_error "端口不能为空"
             continue
         fi
+        if ! validate_port "$LOCAL_PORT"; then
+            continue
+        fi
         
         local status=0
         check_port_occupied "$LOCAL_PORT" "verbose" || status=$?
         
         if [[ $status -eq 1 ]]; then
+             # 端口未被系统占用，检查 gost 配置内部冲突
+             if check_gost_port_conflict "$LOCAL_PORT"; then
+                 read -p "是否仍要使用此端口? [y/N]: " confirm
+                 [[ "$confirm" =~ ^[Yy]$ ]] && break
+                 continue
+             fi
              break
         elif [[ $status -eq 2 ]]; then
              read -p "端口被旧的 GOST 服务占用，是否继续? [Y/n]: " confirm
@@ -819,6 +963,9 @@ add_forwarding_rule() {
              log_error "目标端口不能为空"
              continue
         fi
+        if ! validate_port "$DEST_PORT"; then
+             continue
+        fi
         break
     done
 
@@ -827,7 +974,8 @@ add_forwarding_rule() {
     echo "  1) TCP Only"
     echo "  2) UDP Only"
     echo "  3) TCP + UDP"
-    read -p "请输入 [1-3]: " PROTO_CHOICE
+    local fwd_proto_choice
+    read -p "请输入 [1-3]: " fwd_proto_choice
     
     local forward_path="/${DEST_IP}:${DEST_PORT}"
     local new_args=""
@@ -835,19 +983,19 @@ add_forwarding_rule() {
     # 构造 args
     # 格式: -L protocol://[bind_ip]:port/remote_ip:remote_port
     
-    case "$PROTO_CHOICE" in
+    case "$fwd_proto_choice" in
         1)
-            new_args="-L 'tcp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}'"
+            new_args="-L tcp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}"
             ;;
         2)
-            new_args="-L 'udp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}'"
+            new_args="-L udp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}"
             ;;
         3)
-            new_args="-L 'tcp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}' -L 'udp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}'"
+            new_args="-L tcp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path} -L udp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}"
             ;;
         *)
             log_warn "无效选择，默认使用 TCP"
-            new_args="-L 'tcp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}'"
+            new_args="-L tcp://${LOCAL_BIND}:${LOCAL_PORT}${forward_path}"
             ;;
     esac
 
@@ -909,11 +1057,8 @@ manage_paused_proxies() {
                 # 解析运行中的代理节点
                 nodes=()
                 
-                # 提取所有 -L 参数。支持单引号、双引号或无引号。
-                # 逻辑：查找 -L 后面跟着的内容，直到下一个 -L 或行尾。
-                local temp_exec="$exec_line"
-                # 预处理：将所有 -L 'url' 格式提取出来
-                local nodes_raw=$(echo "$exec_line" | grep -oE "\-L\s+('[^']+'|\"[^\"]+\"|[^ ]+)" | sed -E 's/^-L\s+//; s/^['"'""]//; s/['"'""]$//' || echo "")
+                # 提取所有 -L 参数 (无引号格式: -L protocol://...)
+                local nodes_raw=$(echo "$exec_line" | grep -oP '(?<=-L\s)\S+' || echo "")
                 
                 if [[ -n "$nodes_raw" ]]; then
                     while read -r node; do
@@ -971,7 +1116,7 @@ manage_paused_proxies() {
                 
                 for ((n=0; n<${#nodes[@]}; n++)); do
                     if [[ $n -ne $((node_idx-1)) ]]; then
-                        new_exec="${new_exec} -L '${nodes[n]}'"
+                        new_exec="${new_exec} -L ${nodes[n]}"
                     fi
                 done
                 
@@ -1037,7 +1182,7 @@ manage_paused_proxies() {
                      current_cmd="gost"
                  fi
                  
-                local new_cmd="${current_cmd} -L '${target_resume}'"
+                local new_cmd="${current_cmd} -L ${target_resume}"
                 
                 # Update service
                 # escape special chars for sed is hard, using tmp file method again or awk
@@ -1064,6 +1209,215 @@ manage_paused_proxies() {
                 ;;
         esac
     done
+}
+
+install_sstp_vpn() {
+    echo ""
+    echo -e "${BLUE}═══════════════ 搭建 SSTP VPN ═══════════════${NC}"
+    echo ""
+
+    if [[ ! -f /etc/redhat-release ]] && ! grep -Eqi "debian|ubuntu" /etc/issue; then
+        log_error "不支持的操作系统，仅支持 Debian/Ubuntu/CentOS"
+        return 1
+    fi
+
+    local vpn_port=443
+    local status=0
+    # 检查默认端口 443
+    check_port_occupied "$vpn_port" "silent" || status=$?
+    
+    # 额外检查 gost 配置冲突
+    local gost_conflict=0
+    if check_gost_port_conflict "$vpn_port" >/dev/null 2>&1; then
+        gost_conflict=1
+    fi
+    
+    if [[ $status -eq 0 || $status -eq 2 || $gost_conflict -eq 1 ]]; then
+        if [[ $gost_conflict -eq 1 ]]; then
+            log_warn "默认端口 443 已被 GOST 配置占用。"
+        else
+            log_warn "默认端口 443 已被占用。"
+        fi
+        
+        read -p "请输入其他端口 (例如 8443): " vpn_port
+        if [[ -z "$vpn_port" ]]; then
+            log_error "端口不能为空"
+            return 1
+        fi
+        
+        status=0
+        check_port_occupied "$vpn_port" "verbose" || status=$?
+        
+        # 再次检查 gost 冲突
+        if check_gost_port_conflict "$vpn_port"; then
+             log_error "端口 $vpn_port 已被 GOST 占用，请选择其他端口。"
+             return 1
+        fi
+        
+        if [[ $status -eq 0 || $status -eq 2 ]]; then
+             log_error "端口 $vpn_port 也被占用，请先释放端口或选择其他端口。"
+             return 1
+        fi
+    fi
+
+    # 2. 安装依赖
+    log_info "正在安装依赖 (accel-ppp)..."
+    if [[ -f /etc/redhat-release ]]; then
+        yum install -y epel-release
+        yum install -y accel-ppp openssl iptables-services
+    else
+        apt-get update
+        apt-get install -y accel-ppp openssl iptables
+    fi
+    
+    if ! command -v accel-cmd &>/dev/null; then
+        log_error "accel-ppp 安装失败！请检查包管理器源或手动安装。"
+        return 1
+    fi
+
+    # 3. 生成证书
+    log_info "正在生成 SSL 证书..."
+    local cert_dir="/etc/accel-ppp/certs"
+    mkdir -p "$cert_dir"
+    
+    # CA (使用绝对路径，避免 cd 改变工作目录)
+    if ! openssl genrsa -out "$cert_dir/ca.key" 2048 >/dev/null 2>&1; then
+        log_error "证书生成失败 (openssl error)"
+        return 1
+    fi
+    openssl req -new -x509 -days 3650 -key "$cert_dir/ca.key" -out "$cert_dir/ca.crt" \
+        -subj "/C=CN/ST=State/L=City/O=SSTP-VPN/CN=SSTP-VPN-CA" >/dev/null 2>&1
+
+    # Server Cert
+    local public_ip=$(get_public_ip)
+    openssl genrsa -out "$cert_dir/server.key" 2048 >/dev/null 2>&1
+    openssl req -new -key "$cert_dir/server.key" -out "$cert_dir/server.csr" \
+        -subj "/C=CN/ST=State/L=City/O=SSTP-VPN/CN=$public_ip" >/dev/null 2>&1
+    openssl x509 -req -days 3650 -in "$cert_dir/server.csr" -CA "$cert_dir/ca.crt" -CAkey "$cert_dir/ca.key" -set_serial 01 -out "$cert_dir/server.crt" >/dev/null 2>&1
+
+    # 4. 配置文件
+    log_info "正在配置 accel-ppp..."
+    [[ -f /etc/accel-ppp.conf ]] && cp /etc/accel-ppp.conf /etc/accel-ppp.conf.bak.$(date +%F_%T)
+
+    cat > /etc/accel-ppp.conf <<EOF
+[modules]
+log_syslog
+ppp
+pptp
+l2tp
+sstp
+auth_mschap_v2
+auth_pap
+auth_chap
+ip_pool
+chap-secrets
+
+[core]
+log-error=/var/log/accel-ppp/core.log
+thread-count=4
+
+[common]
+#single-session=replace
+#sid-case=upper
+#sid-source=seq
+
+[ppp]
+verbose=1
+min-mtu=1280
+mtu=1400
+mru=1400
+ipv4=require
+ipv6=deny
+ipv6-intf-id=0:0:0:1
+lcp-echo-interval=20
+lcp-echo-failure=3
+
+[sstp]
+verbose=1
+accept=any
+listen=0.0.0.0:$vpn_port
+cert-hash-algo=sha1
+ssl-ciphers=DEFAULT
+ssl-prefer-server-ciphers=0
+ssl-ecdh-curve=prime256v1
+ssl-pemfile=$cert_dir/server.crt
+ssl-keyfile=$cert_dir/server.key
+ssl-ca-file=$cert_dir/ca.crt
+
+[auth]
+any-login=0
+noauth=0
+
+[dns]
+dns1=8.8.8.8
+dns2=1.1.1.1
+
+[ip-pool]
+gw-ip-address=192.168.100.1
+attr=Framed-Pool
+192.168.100.2-254,name=pool1
+
+[chap-secrets]
+gw-ip-address=192.168.100.1
+chap-secrets=/etc/ppp/chap-secrets
+encrypted=0
+EOF
+
+    # 5. 用户设置
+    read -p "设置 SSTP 用户名: " vpn_user
+    read -s -p "设置 SSTP 密码: " vpn_pass
+    echo ""
+    
+    mkdir -p /etc/ppp
+    # 清理旧的用户如果存在 (简单追加)
+    if grep -q "\"$vpn_user\"" /etc/ppp/chap-secrets 2>/dev/null; then
+         # 如果用户已存在，尝试删除旧行 (简单处理)
+         sed -i "/\"$vpn_user\"/d" /etc/ppp/chap-secrets
+    fi
+    echo "\"$vpn_user\" * \"$vpn_pass\" *" >> /etc/ppp/chap-secrets
+
+    # 6. 网络设置
+    if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+        sysctl -p >/dev/null 2>&1
+    fi
+
+    # IPTables NAT (Idempotent check)
+    if ! iptables -t nat -C POSTROUTING -s 192.168.100.0/24 -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -s 192.168.100.0/24 -j MASQUERADE
+    fi
+    
+    # 尝试保存
+    if [[ -f /etc/redhat-release ]]; then
+        service iptables save >/dev/null 2>&1
+    elif command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save >/dev/null 2>&1
+    fi
+
+    # 7. 启动服务
+    systemctl enable accel-ppp --quiet
+    if systemctl restart accel-ppp; then
+        echo ""
+    else
+        log_error "启动 accel-ppp 失败！请检查日志: journalctl -u accel-ppp"
+        return 1
+    fi
+
+    # 8. 输出信息
+    echo ""
+    echo -e "${GREEN}SSTP VPN 部署完成！${NC}"
+    echo -e "  服务器 IP: ${CYAN}$public_ip${NC}"
+    echo -e "  端口: ${CYAN}$vpn_port${NC}"
+    echo -e "  CA 证书路径: ${CYAN}/etc/accel-ppp/certs/ca.crt${NC}"
+    echo -e "  ${YELLOW}注意: 请务必下载 ca.crt 并导入到客户端设备的“受信任的根证书颁发机构”中，否则连接会失败。${NC}"
+    echo -e "  用户名: ${CYAN}$vpn_user${NC}"
+    echo -e "  密码: ${CYAN}$vpn_pass${NC}"
+    echo ""
+    
+    # 简单的提供下载方式提示
+    echo "您可以使用以下命令在本地下载证书 (需在本地终端运行):"
+    echo -e "scp root@$public_ip:/etc/accel-ppp/certs/ca.crt ./"
+    echo ""
 }
 
 update_script() {
@@ -1169,23 +1523,30 @@ show_proxy_info() {
             echo -e "      认证: ${YELLOW}无${NC}"
         fi
         
-    done < <(echo "$exec_line" | grep -oE "'[^']+'" | tr -d "'")
+    done < <(echo "$exec_line" | grep -oP '(?<=-L\s)\S+')
     
     # 显示连接信息
     echo ""
     echo -e "${YELLOW}═══════════════ 连接信息 ═══════════════${NC}"
     echo -e "  服务器 IP: ${CYAN}$public_ip${NC}"
     
+    # SSTP 检测
+    if systemctl is-active --quiet accel-ppp; then
+        echo -e "  SSTP VPN: ${GREEN}运行中${NC}"
+        local sstp_port=$(grep "listen=" /etc/accel-ppp.conf 2>/dev/null | cut -d: -f2)
+        echo -e "  SSTP 端口: ${CYAN}${sstp_port:-443}${NC}"
+    fi
+
     # 生成测试命令
     echo ""
     echo -e "${YELLOW}═══════════════ 测试命令 ═══════════════${NC}"
     
     # 从解析结果生成测试命令
-    local first_proxy=$(echo "$exec_line" | grep -oE "'[^']+'" | head -1 | tr -d "'")
+    local first_proxy=$(echo "$exec_line" | grep -oP '(?<=-L\s)\S+' | head -1)
     if [[ -n "$first_proxy" ]]; then
         local proto=$(echo "$first_proxy" | grep -oE "^[a-z0-9]+")
         local port=$(echo "$first_proxy" | grep -oE ":([0-9]+)\?" | tr -d ':?')
-        [[ -z "$port" ]] && port=$(echo "$first_proxy" | grep -oE ":([0-9]+)'" | tr -d ":'" )
+        [[ -z "$port" ]] && port=$(echo "$first_proxy" | grep -oE ":([0-9]+)$" | tr -d ':')
         
         if [[ "$first_proxy" =~ ://([^:]+):([^@]+)@ ]]; then
             echo -e "  curl -x ${proto}://${BASH_REMATCH[1]}:${BASH_REMATCH[2]}@${public_ip}:${port} https://www.google.com"
@@ -1197,100 +1558,135 @@ show_proxy_info() {
     echo ""
 }
 
-show_menu() {
-    print_banner
-    echo "请选择操作:"
-    echo "  1) 安装/更新 GOST"
-    echo "  2) 卸载 GOST"
-    echo "  3) 查看运行状态"
-    echo "  4) 查看代理配置"
-    echo "  5) 修改代理配置"
-    echo "  6) 添加新代理节点 (多端口)"
-    echo "  7) 添加流量转发规则 (TCP/UDP)"
-    echo "  8) BBR & TCP 网络优化"
-    echo "  9) 管理暂停的规则 (代理/转发)"
-    echo "  10) 更新脚本"
-    echo "  0) 退出"
-    echo ""
-    read -p "请输入 [0-9]: " choice
+install_gost_flow() {
+    check_root
+    check_dependencies
     
-    case "$choice" in
-        1) 
-            check_root
-            check_dependencies
-            check_existing_installation
-            get_latest_version
-            detect_arch
-            download_and_install
-            configure_proxy
-            create_systemd_service
-            show_result
-            read -p "按任意键返回主菜单..."
-            show_menu
-            ;;
-        2)
-            check_root
-            uninstall
-            read -p "按任意键返回主菜单..."
-            show_menu
-            ;;
-        3)
-            if systemctl is-active --quiet gost 2>/dev/null; then
-                log_info "GOST 运行中"
-                systemctl status gost --no-pager
-            else
-                log_warn "GOST 未运行"
-            fi
-            read -p "按任意键返回主菜单..."
-            show_menu
-            ;;
-        4)
+    # Check if we are updating
+    local is_update=0
+    if [[ -f "$SERVICE_FILE" ]] && systemctl is-active gost &>/dev/null; then
+        is_update=1
+    fi
+
+    check_existing_installation
+    get_latest_version
+    detect_arch
+    download_and_install
+    
+    if [[ $is_update -eq 1 ]]; then
+        echo ""
+        log_info "检测到您是更新操作。"
+        read -p "是否保留当前的代理配置? [Y/n]: " keep_config
+        keep_config=${keep_config:-Y}
+        
+        if [[ "$keep_config" =~ ^[Yy]$ ]]; then
+            log_info "正在保留配置并启动服务..."
+            systemctl daemon-reload
+            systemctl restart gost
+            echo ""
+            log_info "GOST 更新完成！"
             show_proxy_info
-            read -p "按任意键返回主菜单..."
-            show_menu
-            ;;
-        5)
-            check_root
-            modify_proxy
-            read -p "按任意键返回主菜单..."
-            show_menu
-            ;;
-        6)
-            check_root
-            add_proxy_node
-            read -p "按任意键返回主菜单..."
-            show_menu
-            ;;
-        7)
-            check_root
-            add_forwarding_rule
-            read -p "按任意键返回主菜单..."
-            show_menu
-            ;;
-        8)
-            check_root
-            optimize_network
-            read -p "按任意键返回主菜单..."
-            show_menu
-            ;;
-        9)
-            check_root
-            manage_paused_proxies
-            read -p "按任意键返回主菜单..."
-            show_menu
-            ;;
-        10)
-            update_script
-            ;;
-        0)
-            exit 0
-            ;;
-        *)
-            log_error "无效选项"
-            read -p "按任意键重试..."
-            show_menu
-            ;;
-    esac
+            return
+        fi
+    fi
+    
+    # Fresh install or user chose to re-configure
+    configure_proxy
+    create_systemd_service
+    show_result
+}
+
+show_menu() {
+    while true; do
+        print_banner
+        echo "请选择操作:"
+        echo "  1) 安装/更新 GOST"
+        echo "  2) 卸载 GOST"
+        echo "  3) 查看运行状态"
+        echo "  4) 查看代理配置"
+        echo "  5) 修改代理配置"
+        echo "  6) 添加新代理节点 (多端口)"
+        echo "  7) 添加流量转发规则 (TCP/UDP)"
+        echo "  8) BBR & TCP 网络优化"
+        echo "  9) 管理暂停的规则 (代理/转发)"
+        echo "  10) 搭建 SSTP VPN (一键部署)"
+        echo "  11) 更新脚本"
+        echo "  0) 退出"
+        echo ""
+        read -p "请输入 [0-11]: " choice
+        
+        case "$choice" in
+            1) 
+                install_gost_flow
+                read -p "按任意键返回主菜单..."
+                ;;
+            2)
+                check_root
+                uninstall
+                read -p "按任意键返回主菜单..."
+                ;;
+            3)
+                if systemctl is-active --quiet gost 2>/dev/null; then
+                    log_info "GOST 运行中"
+                    systemctl status gost --no-pager
+                else
+                    log_warn "GOST 未运行"
+                fi
+                if systemctl is-active --quiet accel-ppp 2>/dev/null; then
+                    echo ""
+                    log_info "SSTP VPN 运行中"
+                    systemctl status accel-ppp --no-pager
+                fi
+                read -p "按任意键返回主菜单..."
+                ;;
+            4)
+                show_proxy_info
+                read -p "按任意键返回主菜单..."
+                ;;
+            5)
+                check_root
+                modify_proxy
+                read -p "按任意键返回主菜单..."
+                ;;
+            6)
+                check_root
+                add_proxy_node
+                read -p "按任意键返回主菜单..."
+                ;;
+            7)
+                check_root
+                add_forwarding_rule
+                read -p "按任意键返回主菜单..."
+                ;;
+            8)
+                check_root
+                optimize_network
+                read -p "按任意键返回主菜单..."
+                ;;
+            9)
+                check_root
+                manage_paused_proxies
+                read -p "按任意键返回主菜单..."
+                ;;
+            10)
+                check_root
+                install_sstp_vpn
+                read -p "按任意键返回主菜单..."
+                ;;
+            11)
+                update_script
+                # 如果 exec 成功，此处不会执行；如果更新失败，回到菜单
+                read -p "按任意键返回主菜单..."
+                ;;
+            0)
+                exit 0
+                ;;
+            *)
+                log_error "无效选项"
+                read -p "按任意键重试..."
+                ;;
+        esac
+    done
 }
 
 # --- 主入口 ---
