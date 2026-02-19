@@ -1109,12 +1109,10 @@ add_forwarding_rule() {
     echo "  2) 指定 IP"
     read -p "请输入 [1-2]: " BIND_CHOICE
     
-    local LOCAL_BIND="0.0.0.0"
+    local LOCAL_BIND=""
     if [[ "$BIND_CHOICE" == "2" ]]; then
         read -p "请输入要监听的 IP: " LOCAL_IP
-        if [[ -n "$LOCAL_IP" ]]; then
-            LOCAL_BIND="$LOCAL_IP"
-        fi
+        LOCAL_BIND="$LOCAL_IP"
     fi
 
     # 3. 目标地址
@@ -1231,8 +1229,8 @@ manage_paused_proxies() {
                 # 解析运行中的代理节点
                 nodes=()
                 
-                # 提取所有 -L 参数 (无引号格式: -L protocol://...)
-                local nodes_raw=$(echo "$exec_line" | grep -oP '(?<=-L\s)\S+' || echo "")
+                # 提取所有 -L 参数 (支持 -L protocol:// 和 -L=protocol://)
+                local nodes_raw=$(echo "$exec_line" | grep -oP '(?<=-L[\s=])\S+' || echo "")
                 
                 if [[ -n "$nodes_raw" ]]; then
                     while read -r node; do
@@ -1697,7 +1695,7 @@ show_proxy_info() {
             echo -e "      认证: ${YELLOW}无${NC}"
         fi
         
-    done < <(echo "$exec_line" | grep -oP '(?<=-L\s)\S+')
+    done < <(echo "$exec_line" | grep -oP '(?<=-L[\s=])\S+')
     
     # 显示连接信息
     echo ""
@@ -1716,7 +1714,7 @@ show_proxy_info() {
     echo -e "${YELLOW}═══════════════ 测试命令 ═══════════════${NC}"
     
     # 从解析结果生成测试命令
-    local first_proxy=$(echo "$exec_line" | grep -oP '(?<=-L\s)\S+' | head -1)
+    local first_proxy=$(echo "$exec_line" | grep -oP '(?<=-L[\s=])\S+' | head -1)
     if [[ -n "$first_proxy" ]]; then
         local proto=$(echo "$first_proxy" | grep -oE "^[a-z0-9]+")
         local port=$(echo "$first_proxy" | grep -oE ":([0-9]+)\?" | tr -d ':?')
