@@ -110,6 +110,7 @@ check_gost_port_conflict() {
 check_port_occupied() {
     local port=$1
     local verbose=$2 # 传入 "verbose" 显示详细错误
+    local check_udp=$3 # 传入 "udp" 同时检查 UDP 端口
     
     # 检查工具是否存在
     if ! command -v ss &>/dev/null && ! command -v netstat &>/dev/null && ! command -v lsof &>/dev/null; then
@@ -124,6 +125,7 @@ check_port_occupied() {
     local is_occ=1 # 1=未占用, 0=占用
     local proc_name=""
 
+    # TCP 检测
     if command -v ss &>/dev/null; then
         if ss -lntp | grep -qE ":$port\s+"; then
             is_occ=0
@@ -138,6 +140,23 @@ check_port_occupied() {
         if lsof -i :$port -sTCP:LISTEN -P -n &>/dev/null; then
             is_occ=0
             proc_name=$(lsof -i :$port -sTCP:LISTEN -P -n | awk 'NR==2{print $1}' | head -1)
+        fi
+    fi
+
+    # UDP 检测 (如果指定了 udp 参数且 TCP 未发现占用)
+    if [[ $is_occ -eq 1 && "$check_udp" == "udp" ]]; then
+        if command -v ss &>/dev/null; then
+            if ss -lnup | grep -qE ":$port\s+"; then
+                is_occ=0
+                proc_name=$(ss -lnup | grep -E ":$port\s+" | awk '{print $NF}' | cut -d'"' -f2 | head -1)
+                [[ "$verbose" == "verbose" ]] && log_warn "端口 $port 的 UDP 已被占用！"
+            fi
+        elif command -v netstat &>/dev/null; then
+            if netstat -nlpu | grep -qE ":$port\s+"; then
+                is_occ=0
+                proc_name=$(netstat -nlpu | grep -E ":$port\s+" | awk '{print $NF}' | cut -d'/' -f2 | head -1)
+                [[ "$verbose" == "verbose" ]] && log_warn "端口 $port 的 UDP 已被占用！"
+            fi
         fi
     fi
 
@@ -159,6 +178,70 @@ check_port_occupied() {
     fi
     
     return 1
+}
+
+# 验证 IP 地址或域名格式
+validate_ip() {
+    local ip=$1
+    # IPv4
+    if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        return 0
+    fi
+    # 域名 (简单检测: 包含字母和点)
+    if [[ "$ip" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# 创建基础 systemd 服务文件 (无代理配置，仅 gost 骨架)
+create_base_service() {
+    if [[ ! -f "$INSTALL_PATH" ]] && ! command -v gost &>/dev/null; then
+        log_error "未找到 GOST 二进制文件，请先安装 GOST (选项 1)"
+        return 1
+    fi
+    log_info "自动创建基础 systemd 服务..."
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=GOST Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$INSTALL_PATH
+Restart=always
+RestartSec=5
+User=root
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable gost --quiet
+    log_info "基础服务文件已创建"
+    return 0
+}
+
+# 安全地更新 service 文件的 ExecStart 行 (避免 awk 特殊字符问题)
+update_service_exec() {
+    local new_cmd="$1"
+    local service_file="$2"
+    # 使用 perl 替换，比 awk -v 更安全处理特殊字符
+    if command -v perl &>/dev/null; then
+        local tmpfile=$(mktemp)
+        NEW_CMD="$new_cmd" perl -pe 'BEGIN{$r=$ENV{NEW_CMD}} s/^ExecStart=.*/ExecStart=$r/' "$service_file" > "$tmpfile" && mv "$tmpfile" "$service_file"
+    else
+        # Fallback: 纯 bash 重写 (最安全)
+        local tmpfile=$(mktemp)
+        while IFS= read -r line; do
+            if [[ "$line" == ExecStart=* ]]; then
+                echo "ExecStart=$new_cmd"
+            else
+                echo "$line"
+            fi
+        done < "$service_file" > "$tmpfile" && mv "$tmpfile" "$service_file"
+    fi
 }
 
 # 确保配置目录存在
@@ -218,12 +301,25 @@ check_existing_installation() {
         echo -e "      ${RED}注意: 该进程似乎未被本脚本的 systemd 服务管理。${NC}"
     fi
     
+    # 尝试获取当前运行的 gost 命令行参数
+    local current_cmdline=""
+    if [[ $has_process -eq 1 ]]; then
+        local gost_pid=$(pgrep -x gost | head -1)
+        if [[ -n "$gost_pid" && -f "/proc/$gost_pid/cmdline" ]]; then
+            current_cmdline=$(cat /proc/$gost_pid/cmdline 2>/dev/null | tr '\0' ' ' | sed 's/ $//')
+        fi
+        if [[ -n "$current_cmdline" ]]; then
+            echo -e "      启动命令: ${CYAN}$current_cmdline${NC}"
+        fi
+    fi
+    
     echo ""
     echo "请选择操作:"
     echo "  1) 强制覆盖安装 (将停止旧进程并替换)"
-    echo "  2) 退出安装"
+    echo "  2) 接管到 systemd 管理 (保留当前配置，纳入 systemd 自动管理)"
+    echo "  3) 退出安装"
     echo ""
-    read -p "请输入 [1-2]: " conflict_choice
+    read -p "请输入 [1-3]: " conflict_choice
     
     case "$conflict_choice" in
         1)
@@ -238,6 +334,78 @@ check_existing_installation() {
                 fi
             fi
             return 0
+            ;;
+        2)
+            # 接管到 systemd 管理
+            if [[ -z "$current_cmdline" ]]; then
+                log_error "无法读取当前 gost 进程的启动参数，无法接管"
+                return 1
+            fi
+            
+            # 将命令中的旧路径替换为标准路径
+            local adopt_cmd="$current_cmdline"
+            if [[ "$binary_path" != "$INSTALL_PATH" && -n "$binary_path" ]]; then
+                adopt_cmd=$(echo "$adopt_cmd" | sed "s|$binary_path|$INSTALL_PATH|g")
+            fi
+            # 确保命令以标准路径开头
+            if [[ "$adopt_cmd" != "$INSTALL_PATH"* ]]; then
+                # 替换命令开头的 gost 为完整路径
+                adopt_cmd=$(echo "$adopt_cmd" | sed "s|^gost |$INSTALL_PATH |; s|^[^ ]*/gost |$INSTALL_PATH |")
+            fi
+            
+            log_info "正在创建 systemd 服务..."
+            echo -e "  将使用命令: ${CYAN}$adopt_cmd${NC}"
+            
+            # 如果二进制不在标准路径，复制过去
+            if [[ "$binary_path" != "$INSTALL_PATH" && -f "$binary_path" ]]; then
+                cp "$binary_path" "$INSTALL_PATH"
+                chmod +x "$INSTALL_PATH"
+                log_info "已将二进制文件复制到 $INSTALL_PATH"
+            fi
+            
+            # 停止旧进程
+            pkill -x gost || true
+            sleep 1
+            
+            # 创建 systemd service
+            cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=GOST Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$adopt_cmd
+Restart=always
+RestartSec=5
+User=root
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            
+            systemctl daemon-reload
+            systemctl enable gost --quiet
+            if systemctl start gost; then
+                echo ""
+                log_info "✅ 接管成功！GOST 已纳入 systemd 管理。"
+                show_proxy_info
+            else
+                log_error "systemd 启动失败，请检查: journalctl -u gost"
+            fi
+            
+            # 清理旧的二进制
+            if [[ -f "$binary_path" && "$binary_path" != "$INSTALL_PATH" ]]; then
+                read -p "是否删除旧的二进制文件? [Y/n]: " del_old
+                if [[ ! "$del_old" =~ ^[Nn]$ ]]; then
+                    rm -f "$binary_path"
+                    log_info "已删除旧二进制文件"
+                fi
+            fi
+            
+            # 接管完成后直接回主菜单，不继续安装流程
+            exit 0
             ;;
         *)
             log_info "已取消安装"
@@ -784,8 +952,8 @@ add_proxy_node() {
     echo ""
     
     if [[ ! -f "$SERVICE_FILE" ]]; then
-        log_error "未找到 GOST 服务配置，请先安装"
-        return 1
+        log_warn "未找到 GOST 服务配置，正在自动创建..."
+        create_base_service || return 1
     fi
     
     # 1. 设置新代理参数
@@ -869,8 +1037,8 @@ add_proxy_node() {
     # 备份
     cp "$SERVICE_FILE" "${SERVICE_FILE}.bak"
     
-    # 写入新内容 (使用 awk 避免转义噩梦)
-    awk -v new="$new_cmd" '/^ExecStart=/ {$0="ExecStart=" new} 1' "${SERVICE_FILE}.bak" > "$SERVICE_FILE"
+    # 安全写入新内容
+    update_service_exec "$new_cmd" "$SERVICE_FILE"
     
     log_info "已添加新节点配置。"
     
@@ -885,7 +1053,7 @@ add_proxy_node() {
         log_error "服务启动失败！正在回滚配置..."
         mv "${SERVICE_FILE}.bak" "$SERVICE_FILE"
         systemctl daemon-reload
-        systemctl restart gost
+        systemctl restart gost 2>/dev/null || true
         log_info "已恢复原有配置。"
         return 1
     fi
@@ -898,8 +1066,8 @@ add_forwarding_rule() {
     echo ""
 
     if [[ ! -f "$SERVICE_FILE" ]]; then
-        log_error "未找到 GOST 服务配置，请先安装"
-        return 1
+        log_warn "未找到 GOST 服务配置，正在自动创建..."
+        create_base_service || return 1
     fi
 
     # 1. 本地监听端口
@@ -914,7 +1082,7 @@ add_forwarding_rule() {
         fi
         
         local status=0
-        check_port_occupied "$LOCAL_PORT" "verbose" || status=$?
+        check_port_occupied "$LOCAL_PORT" "verbose" "udp" || status=$?
         
         if [[ $status -eq 1 ]]; then
              # 端口未被系统占用，检查 gost 配置内部冲突
@@ -941,10 +1109,12 @@ add_forwarding_rule() {
     echo "  2) 指定 IP"
     read -p "请输入 [1-2]: " BIND_CHOICE
     
-    local LOCAL_BIND=""
+    local LOCAL_BIND="0.0.0.0"
     if [[ "$BIND_CHOICE" == "2" ]]; then
         read -p "请输入要监听的 IP: " LOCAL_IP
-        LOCAL_BIND="$LOCAL_IP"
+        if [[ -n "$LOCAL_IP" ]]; then
+            LOCAL_BIND="$LOCAL_IP"
+        fi
     fi
 
     # 3. 目标地址
@@ -952,6 +1122,10 @@ add_forwarding_rule() {
         read -p "设置目标 IP (例如 1.1.1.1): " DEST_IP
         if [[ -z "$DEST_IP" ]]; then
              log_error "目标 IP 不能为空"
+             continue
+        fi
+        if ! validate_ip "$DEST_IP"; then
+             log_error "无效的 IP 地址或域名格式"
              continue
         fi
         break
@@ -1000,15 +1174,15 @@ add_forwarding_rule() {
     esac
 
     # 5. 追加到 Service 文件
-    # 使用 awk 将新参数追加到 ExecStart 末尾
     cp "$SERVICE_FILE" "${SERVICE_FILE}.bak"
     local output=$(grep "^ExecStart=" "$SERVICE_FILE")
     local current_cmd=${output#ExecStart=}
     local new_cmd="${current_cmd} ${new_args}"
     
-    awk -v new="$new_cmd" '/^ExecStart=/ {$0="ExecStart=" new} 1' "${SERVICE_FILE}.bak" > "$SERVICE_FILE"
+    # 安全写入新内容
+    update_service_exec "$new_cmd" "$SERVICE_FILE"
     
-    log_info "已添加转发规则: 本地 ${LOCAL_BIND:-*}:${LOCAL_PORT} -> 目标 ${DEST_IP}:${DEST_PORT}"
+    log_info "已添加转发规则: 本地 ${LOCAL_BIND}:${LOCAL_PORT} -> 目标 ${DEST_IP}:${DEST_PORT}"
     
     systemctl daemon-reload
     if systemctl restart gost; then
@@ -1020,7 +1194,7 @@ add_forwarding_rule() {
         log_error "服务启动失败！正在回滚..."
         mv "${SERVICE_FILE}.bak" "$SERVICE_FILE"
         systemctl daemon-reload
-        systemctl restart gost
+        systemctl restart gost 2>/dev/null || true
         log_info "已恢复原有配置。"
         return 1
     fi
@@ -1564,7 +1738,7 @@ install_gost_flow() {
     
     # Check if we are updating
     local is_update=0
-    if [[ -f "$SERVICE_FILE" ]] && systemctl is-active gost &>/dev/null; then
+    if [[ -f "$SERVICE_FILE" ]]; then
         is_update=1
     fi
 
@@ -1587,13 +1761,21 @@ install_gost_flow() {
             log_info "GOST 更新完成！"
             show_proxy_info
             return
+        else
+            log_info "已清除旧配置。请通过主菜单选项 5 或 6 重新配置代理。"
+            # 停止旧服务
+            systemctl stop gost 2>/dev/null || true
+            return
         fi
     fi
     
-    # Fresh install or user chose to re-configure
-    configure_proxy
-    create_systemd_service
-    show_result
+    # 全新安装完成，提示用户通过菜单配置
+    echo ""
+    log_info "GOST 安装完成！"
+    log_info "请返回主菜单，选择以下选项来配置代理："
+    echo -e "  ${CYAN}5)${NC} 修改代理配置"
+    echo -e "  ${CYAN}6)${NC} 添加新代理节点 (多端口)"
+    echo -e "  ${CYAN}7)${NC} 添加流量转发规则 (TCP/UDP)"
 }
 
 show_menu() {
@@ -1626,10 +1808,25 @@ show_menu() {
                 read -p "按任意键返回主菜单..."
                 ;;
             3)
+                local gost_found=0
                 if systemctl is-active --quiet gost 2>/dev/null; then
-                    log_info "GOST 运行中"
+                    log_info "GOST 运行中 (systemd 服务)"
                     systemctl status gost --no-pager
-                else
+                    gost_found=1
+                fi
+                # 同时检查是否有独立运行的 gost 进程
+                local gost_pids=$(pgrep -x gost 2>/dev/null || true)
+                if [[ -n "$gost_pids" && $gost_found -eq 0 ]]; then
+                    log_info "GOST 运行中 (独立进程)"
+                    echo -e "  PID: ${CYAN}$gost_pids${NC}"
+                    echo -e "  ${YELLOW}注意: 该进程未被本脚本的 systemd 服务管理。${NC}"
+                    echo -e "  运行命令:"
+                    for pid in $gost_pids; do
+                        echo -e "    ${CYAN}$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ')${NC}"
+                    done
+                    gost_found=1
+                fi
+                if [[ $gost_found -eq 0 ]]; then
                     log_warn "GOST 未运行"
                 fi
                 if systemctl is-active --quiet accel-ppp 2>/dev/null; then
