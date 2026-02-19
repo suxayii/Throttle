@@ -78,7 +78,7 @@ get_gost_used_ports() {
         return
     fi
     # 从所有 -L 参数中提取端口号 (格式: protocol://[auth@][host]:port[?...])
-    echo "$exec_line" | grep -oP '(?<=-L\s)\S+' | while read -r url; do
+    echo "$exec_line" | grep -oP '(?<=-L[\s=])\S+' | while read -r url; do
         # 移除 scheme
         local temp=${url#*://}
         # 移除 auth
@@ -404,8 +404,8 @@ EOF
                 fi
             fi
             
-            # 接管完成后直接回主菜单，不继续安装流程
-            exit 0
+            # 接管完成后回到主菜单，不继续安装流程
+            return 1
             ;;
         *)
             log_info "已取消安装"
@@ -596,15 +596,15 @@ build_command() {
     case "$PROTO_CHOICE" in
         1) 
             PROTO="socks5"
-            CMD="gost -L ${PROTO}://${auth_str}:${PORT}?keepalive=true"
+            CMD="$INSTALL_PATH -L ${PROTO}://${auth_str}:${PORT}?keepalive=true"
             ;;
         2) 
             PROTO="http"
-            CMD="gost -L ${PROTO}://${auth_str}:${PORT}?keepalive=true"
+            CMD="$INSTALL_PATH -L ${PROTO}://${auth_str}:${PORT}?keepalive=true"
             ;;
         3) 
             PROTO="socks5+http"
-            CMD="gost -L socks5://${auth_str}:${PORT}?keepalive=true -L http://${auth_str}:${PORT2}?keepalive=true"
+            CMD="$INSTALL_PATH -L socks5://${auth_str}:${PORT}?keepalive=true -L http://${auth_str}:${PORT2}?keepalive=true"
             ;;
     esac
 }
@@ -681,6 +681,7 @@ uninstall() {
     if systemctl is-active --quiet gost 2>/dev/null; then
         systemctl stop gost
     fi
+    pkill -x gost || true
     systemctl disable gost --quiet 2>/dev/null || true
     rm -f "$SERVICE_FILE"
     rm -f "$INSTALL_PATH"
@@ -791,7 +792,7 @@ modify_proxy() {
     local current_pass=""
     
     # 解析协议 (取第一个 -L 的协议)
-    local first_url=$(echo "$exec_line" | grep -oP '(?<=-L\s)\S+' | head -1)
+    local first_url=$(echo "$exec_line" | grep -oP '(?<=-L[\s=])\S+' | head -1)
     if [[ "$first_url" =~ ^socks5:// ]]; then
         current_proto="socks5"
     elif [[ "$first_url" =~ ^http:// ]]; then
@@ -800,7 +801,7 @@ modify_proxy() {
     
     # 检测是否为双协议模式
     local is_dual=0
-    local proto_count=$(echo "$exec_line" | grep -oP '(?<=-L\s)\S+' | grep -cE '^(socks5|http)://')
+    local proto_count=$(echo "$exec_line" | grep -oP '(?<=-L[\s=])\S+' | grep -cE '^(socks5|http)://')
     if [[ $proto_count -ge 2 ]]; then
         is_dual=1
     fi
@@ -864,7 +865,7 @@ modify_proxy() {
             
             # 替换端口
             local new_exec=$(echo "$exec_line" | sed -E "s/:${current_port}\?/:${new_port}?/g")
-            sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
+            update_service_exec "$new_exec" "$SERVICE_FILE"
             
             log_info "端口已修改为: $new_port"
             ;;
@@ -899,7 +900,7 @@ modify_proxy() {
                 log_info "认证已取消"
             fi
             
-            sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
+            update_service_exec "$new_exec" "$SERVICE_FILE"
             ;;
         3)
             echo "选择新协议:"
@@ -916,7 +917,7 @@ modify_proxy() {
             
             # 只替换第一个匹配的协议，而不是全局替换
             local new_exec=$(echo "$exec_line" | sed -E "0,/${current_proto}:\/\//s|${current_proto}://|${new_proto}://|")
-            sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
+            update_service_exec "$new_exec" "$SERVICE_FILE"
             
             log_info "协议已修改为: $new_proto"
             ;;
@@ -1274,7 +1275,8 @@ manage_paused_proxies() {
                          # 清理 ExecStart 参数
                          local new_exec=${exec_line%% -L*}
                          
-                         sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
+                         update_service_exec "$new_exec" "$SERVICE_FILE"
+                         systemctl daemon-reload
                          log_info "唯一节点已暂停，服务已停止。"
                          continue
                     else
@@ -1292,7 +1294,7 @@ manage_paused_proxies() {
                     fi
                 done
                 
-                sed -i "s|^ExecStart=.*|ExecStart=$new_exec|" "$SERVICE_FILE"
+                update_service_exec "$new_exec" "$SERVICE_FILE"
                 
                 # Save to paused file
                 echo "$target_node" >> "$PAUSED_FILE"
@@ -1357,8 +1359,7 @@ manage_paused_proxies() {
                 local new_cmd="${current_cmd} -L ${target_resume}"
                 
                 # Update service
-                # escape special chars for sed is hard, using tmp file method again or awk
-                 awk -v new="$new_cmd" '/^ExecStart=/ {$0="ExecStart=" new} 1' "$SERVICE_FILE" > "${SERVICE_FILE}.tmp" && mv "${SERVICE_FILE}.tmp" "$SERVICE_FILE"
+                 update_service_exec "$new_cmd" "$SERVICE_FILE"
                  
                  # Remove from paused file
                  # We use grep -v to filter out the exact line. 
@@ -1680,6 +1681,8 @@ show_proxy_info() {
         temp_url=${temp_url#*@}
         # 截取 host:port 部分 (去掉可能的 path)
         local listen_part=${temp_url%%/*}
+        # 移除 query (Suggestion 3)
+        listen_part=${listen_part%%\?*}
         # 截取端口 (最后冒号后的部分)
         local port=${listen_part##*:}
 
@@ -1713,8 +1716,8 @@ show_proxy_info() {
     echo ""
     echo -e "${YELLOW}═══════════════ 测试命令 ═══════════════${NC}"
     
-    # 从解析结果生成测试命令
-    local first_proxy=$(echo "$exec_line" | grep -oP '(?<=-L[\s=])\S+' | head -1)
+    # 从解析结果生成第一个非转发代理的测试命令
+    local first_proxy=$(echo "$exec_line" | grep -oP '(?<=-L[\s=])\S+' | grep -v "/" | head -1)
     if [[ -n "$first_proxy" ]]; then
         local proto=$(echo "$first_proxy" | grep -oE "^[a-z0-9]+")
         local port=$(echo "$first_proxy" | grep -oE ":([0-9]+)\?" | tr -d ':?')
@@ -1740,7 +1743,7 @@ install_gost_flow() {
         is_update=1
     fi
 
-    check_existing_installation
+    check_existing_installation || return 0
     get_latest_version
     detect_arch
     download_and_install
