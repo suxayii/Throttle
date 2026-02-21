@@ -14,6 +14,8 @@ This project provides a set of efficient, easy-to-use Linux server network manag
   - [2. Port Throttle Tool (Throttle.sh)](#2-port-throttle-tool-throttlesh)
   - [3. BBR Optimization Script (bbr.sh)](#3-bbr-optimization-script-bbrsh)
   - [4. GOST Proxy Script (gost-proxy.sh)](#4-gost-proxy-script-gost-proxysh)
+  - [5. NAT Optimization Script (nat_optimize.sh)](#5-nat-optimization-script-nat_optimizesh)
+  - [6. iptables Port Forwarding (iptables-forward.sh)](#6-iptables-port-forwarding-iptables-forwardsh)
 - [🚀 Quick Start](#-quick-start)
 - [📋 System Requirements](#-system-requirements)
 - [🤝 Contributing](#-contributing)
@@ -71,7 +73,28 @@ A minimalist deployment tool for GOST tunnel/proxy services (v2.0).
 -   **Key Features**:
     -   **Multi-Protocol Support**: Easily deploy SOCKS5, HTTP, and hybrid protocols.
     -   **Multi-Node Management**: Supports running multiple independent proxy nodes simultaneously with separate authentication settings.
+    -   **Traffic Forwarding**: Supports TCP/UDP port forwarding configuration.
     -   **Automatic Daemon**: Automatically configures Systemd services to ensure the proxy process stays online.
+
+### 5. NAT Optimization Script (`nat_optimize.sh`)
+Depth optimization tool designed for NAT forwarding servers, especially for LXC/Docker container environments.
+
+-   **Key Features**:
+    -   **Container Friendly**: Automatically identifies virtualization environments and compatible with read-only kernel parameters.
+    -   **Smart Connectivity Tracking**: Automatically calculates `nf_conntrack_max` based on memory.
+    -   **Aggressive Connection Recycling**: Shortens TCP/UDP timeout sessions.
+    -   **BBR/Queue Optimization**: Automatically enables BBR + FQ and optimizes UDP buffers.
+    -   **System Tuning**: Adjusts Ring Buffer, enables RSS, installs irqbalance, and increases file descriptor limits.
+
+### 6. iptables Port Forwarding (`iptables-forward.sh`)
+An iptables-based port forwarding management tool, providing a safely reconstructed forwarding solution with persistence support.
+
+-   **Key Features**:
+    -   **Safe Reconstruction**: Uses a "delete-then-add" logic to ensure no interference with existing NAT rules like Docker.
+    -   **Protocol Support**: Supports both TCP and UDP port forwarding.
+    -   **Rule Persistence**: Adapts to native persistence solutions for Debian/Ubuntu (netfilter-persistent) and CentOS (iptables-services).
+    -   **User-friendly Menu**: Provides an interactive menu for adding, listing, deleting, and reloading rules.
+    -   **Auto-Check**: Automatically detects and configures kernel forwarding and necessary tools.
 
 ---
 
@@ -107,6 +130,16 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 #### 4. GOST Proxy Deployment
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
+```
+
+#### 5. NAT Optimization (LXC/Container recommended)
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nat_optimize.sh)
+```
+
+#### 6. iptables Port Forwarding
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/iptables-forward.sh)
 ```
 
 ---
