@@ -14,8 +14,7 @@
   - [2. 端口限速工具 (Throttle.sh)](#2-端口限速工具-throttlesh)
   - [3. BBR 网络优化脚本 (bbr.sh)](#3-bbr-网络优化脚本-bbrsh)
   - [4. GOST 代理部署脚本 (gost-proxy.sh)](#4-gost-代理部署脚本-gost-proxysh)
-  - [5. NAT 专用优化脚本 (nat_optimize.sh)](#5-nat-专用优化脚本-nat_optimizesh)
-  - [6. nftables 端口转发管理 (nft-forward.sh)](#6-nftables-端口转发管理-nft-forwardsh)
+  - [5. nftables 端口转发管理与 NAT 优化 (nft-forward.sh)](#5-nftables-端口转发管理与-nat-优化-nft-forwardsh)
 - [🚀 快速开始](#-快速开始)
 - [📋 系统要求](#-系统要求)
 - [🤝 贡献与反馈](#-贡献与反馈)
@@ -77,25 +76,15 @@
     -   **流量转发**：支持 TCP/UDP 端口转发配置。
     -   **自动守护**：自动配置 Systemd 服务，确保代理进程稳定在线。
 
-### 5. NAT 专用优化脚本 (`nat_optimize.sh`)
-专为 NAT 转发服务器设计的深度优化工具，特别适配 **LXC/Docker 容器环境**。
+### 5. nftables 端口转发管理与 NAT 优化 (`nft-forward.sh`)
+**推荐！** 基于 `nftables` 的现代化端口转发工具，现已集成 **NAT 服务器深度优化功能**。
 
 -   **核心功能**：
-    -   **容器友好**：自动识别虚拟化环境，兼容只读内核参数，LXC/Proxmox 下稳定运行。
-    -   **智能连接跟踪**：根据内存自动计算 `nf_conntrack_max`，防止高并发丢包。
-    -   **激进连接回收**：缩短 TCP/UDP 超时时间，加速连接表释放，适合大量短连接场景。
-    -   **BBR/队列优化**：自动启用 BBR + FQ，优化 UDP 缓冲区以支持 QUIC/Hysteria。
-    -   **网卡/系统调优**：自动调整 Ring Buffer、启用多队列 RSS、安装 irqbalance 及提升文件描述符限制。
-
-### 6. nftables 端口转发管理 (`nft-forward.sh`)
-基于 `nftables` 的端口转发管理工具，提供现代化的转发方案，支持持久化。
-
--   **核心功能**：
-    -   **表隔离**：使用专用 `nftables` 表管理，不影响系统其他网络规则。
-    -   **协议支持**：同时支持 TCP 和 UDP 的端口转发。
-    -   **规则持久化**：自动保存规则至标准路径，确保重启不丢失。
-    -   **易用菜单**：提供添加、查看、删除、重载等交互式管理菜单。
-    -   **环境自检**：自动检测并配置内核转发与必要工具。
+    -   **二合一设计**：支持交互式添加/删除转发规则，同时提供一键式 NAT 网络调优。
+    -   **智能网络优化**：集成 `nat_optimize` 核心逻辑，支持 LXC/Docker 容器环境，自动优化连接跟踪 (`nf_conntrack`)、ARP 缓存、BBR 拥塞控制及 UDP 缓冲区。
+    -   **表隔离与持久化**：使用专用 `nftables` 表管理，不影响系统其他规则，支持规则自动持久化保存。
+    -   **精准控制**：支持来源 IP 白名单过滤、绑定特定网卡接口、协议分离控制（TCP/UDP/两者）。
+    -   **极简操作**：全交互式菜单，自动配置内核转发及环境依赖。
 
 ---
 
@@ -133,12 +122,7 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
 ```
 
-#### 5. NAT 专用优化 (LXC/容器推荐)
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nat_optimize.sh)
-```
-
-#### 6. nftables 端口转发
+#### 5. nftables 端口转发 & NAT 优化 (推荐)
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nft-forward.sh)
 ```

@@ -14,8 +14,7 @@ This project provides a set of efficient, easy-to-use Linux server network manag
   - [2. Port Throttle Tool (Throttle.sh)](#2-port-throttle-tool-throttlesh)
   - [3. BBR Optimization Script (bbr.sh)](#3-bbr-optimization-script-bbrsh)
   - [4. GOST Proxy Script (gost-proxy.sh)](#4-gost-proxy-script-gost-proxysh)
-  - [5. NAT Optimization Script (nat_optimize.sh)](#5-nat-optimization-script-nat_optimizesh)
-  - [6. nftables Port Forwarding (nft-forward.sh)](#6-nftables-port-forwarding-nft-forwardsh)
+  - [5. nftables Port Forwarding & NAT Optimization (nft-forward.sh)](#5-nftables-port-forwarding--nat-optimization-nft-forwardsh)
 - [🚀 Quick Start](#-quick-start)
 - [📋 System Requirements](#-system-requirements)
 - [🤝 Contributing](#-contributing)
@@ -76,25 +75,15 @@ A minimalist deployment tool for GOST tunnel/proxy services (v2.0).
     -   **Traffic Forwarding**: Supports TCP/UDP port forwarding configuration.
     -   **Automatic Daemon**: Automatically configures Systemd services to ensure the proxy process stays online.
 
-### 5. NAT Optimization Script (`nat_optimize.sh`)
-Depth optimization tool designed for NAT forwarding servers, especially for LXC/Docker container environments.
+### 5. nftables Port Forwarding & NAT Optimization (`nft-forward.sh`)
+**Recommended!** A modernized port forwarding tool based on `nftables`, now integrated with **NAT Server Depth Optimization**.
 
 -   **Key Features**:
-    -   **Container Friendly**: Automatically identifies virtualization environments and compatible with read-only kernel parameters.
-    -   **Smart Connectivity Tracking**: Automatically calculates `nf_conntrack_max` based on memory.
-    -   **Aggressive Connection Recycling**: Shortens TCP/UDP timeout sessions.
-    -   **BBR/Queue Optimization**: Automatically enables BBR + FQ and optimizes UDP buffers.
-    -   **System Tuning**: Adjusts Ring Buffer, enables RSS, installs irqbalance, and increases file descriptor limits.
-
-### 6. nftables Port Forwarding (`nft-forward.sh`)
-An nftables-based port forwarding management tool, providing a modern forwarding solution with persistence support.
-
--   **Key Features**:
-    -   **Table Isolation**: Uses a dedicated `nftables` table for management, ensuring no interference with other system rules.
-    -   **Protocol Support**: Supports both TCP and UDP port forwarding.
-    -   **Rule Persistence**: Automatically saves rules to standard paths, ensuring survival across reboots.
-    -   **User-friendly Menu**: Provides an interactive menu for adding, listing, deleting, and reloading rules.
-    -   **Auto-Check**: Automatically detects and configures kernel forwarding and necessary tools.
+    -   **Two-in-One Design**: Supports interactive addition/deletion of forwarding rules while providing one-click NAT network tuning.
+    -   **Smart Network Tuning**: Built-in `nat_optimize` logic for LXC/Docker environments, optimizing connection tracking (`nf_conntrack`), ARP cache, BBR control, and UDP buffers.
+    -   **Table Isolation & Persistence**: Uses a dedicated `nftables` table ensuring no interference with other rules, with automatic rule persistence.
+    -   **Precise Control**: Supports Source IP whitelisting, interface binding, and protocol separation (TCP/UDP/Both).
+    -   **Easy Operation**: Fully interactive menu with automatic kernel forwarding and dependency configuration.
 
 ---
 
@@ -132,12 +121,7 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
 ```
 
-#### 5. NAT Optimization (LXC/Container recommended)
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nat_optimize.sh)
-```
-
-#### 6. nftables Port Forwarding
+#### 5. nftables Port Forwarding & NAT Optimization (Recommended)
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nft-forward.sh)
 ```

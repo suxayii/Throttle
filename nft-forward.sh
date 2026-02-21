@@ -1,206 +1,583 @@
 #!/usr/bin/env bash
 # =========================================================
-# nftables 转发管理脚本 - 现代化迁移版
+# nftables 端口转发管理脚本 + NAT 服务器一键优化 (二合一集大成版)
+# 版本: v4.0
 # =========================================================
 
+# ===================== 基础设置变量 =====================
+# 转发相关
 RULES_FILE="/etc/nft-forward-rules.conf"
 NFT_TABLE="throttle_forward"
+NFT_FORWARD_FILE="/etc/nftables/throttle_forward.nft"
+NFT_MAIN_CONF="/etc/nftables.conf"
 
-# -------------------------------
-# 1. 基础环境检测与安装
-# -------------------------------
-check_env() {
-    if ! command -v nft >/dev/null 2>&1; then
-        echo "未检测到 nftables。"
-        read -p "是否尝试自动安装 nftables? [y/N]: " i
-        if [[ "$i" =~ ^[Yy]$ ]]; then
-            if command -v apt >/dev/null 2>&1; then
-                apt update
-                apt install nftables -y
-                systemctl enable nftables
-                systemctl start nftables
-            elif command -v yum >/dev/null 2>&1; then
-                yum install nftables -y
-                systemctl enable nftables
-                systemctl start nftables
-            else
-                echo "不支持的包管理器，请手动安装 nftables。"
-                exit 1
-            fi
-        else
-            echo "未安装必要依赖，退出。"
-            exit 1
-        fi
-    fi
-}
+# 优化相关
+NAT_VERSION="2.0.0"
+CONFIG_FILE="/etc/sysctl.d/99-nat-optimize.conf"
+BACKUP_DIR="/root/nat-optimize-backup"
 
-# -------------------------------
-# 2. 开启内核转发并初始化 nftables 表
-# -------------------------------
-init_nft() {
-    # 开启内核转发
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null
-    if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-    fi
+# 颜色控制
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-    # 初始化 nftables 结构
-    if ! nft list table ip $NFT_TABLE >/dev/null 2>&1; then
-        nft add table ip $NFT_TABLE
-        nft add chain ip $NFT_TABLE prerouting { type nat hook prerouting priority dstnat \; policy accept \; }
-        nft add chain ip $NFT_TABLE postrouting { type nat hook postrouting priority srcnat \; policy accept \; }
-    fi
-}
+# ===================== 基础辅助函数 =====================
+print_success() { echo -e "${GREEN}✔ $1${NC}"; }
+print_error() { echo -e "${RED}✘ $1${NC}"; }
+print_info() { echo -e "${BLUE}➤ $1${NC}"; }
+print_warn() { echo -e "${YELLOW}⚠ $1${NC}"; }
 
-# -------------------------------
-# 3. 持久化规则
-# -------------------------------
-save_rules() {
-    # 导出当前 nftables 配置到系统标准路径
-    if [[ -d /etc/nftables ]] || [[ -f /etc/nftables.conf ]]; then
-        nft list ruleset > /etc/nftables.conf
-        echo "nftables 规则已持久化到 /etc/nftables.conf ✔"
-    else
-        echo "警告: 未找到标准 nftables 配置文件路径，请手动备份规则。"
-    fi
-}
+# NAT优化专用的打印别名映射
+ok(){ print_success "$*"; }
+warn(){ print_warn "$*"; }
+err(){ print_error "$*"; }
+info(){ print_info "$*"; }
+line(){ echo "------------------------------------------------------------"; }
+cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
 
-# -------------------------------
-# 辅助函数：校验端口和IP
-# -------------------------------
 is_valid_port() {
     [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
 is_valid_ip() {
-    [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]
-}
-
-# -------------------------------
-# 4. 添加转发
-# -------------------------------
-add_rule() {
-    read -p "请输入本地监听端口 (1-65535): " LPORT
-    if ! is_valid_port "$LPORT"; then echo "错误: 本地端口无效！"; return; fi
-
-    read -p "请输入目标机器 IP: " TIP
-    if ! is_valid_ip "$TIP"; then echo "错误: IP 地址格式无效！"; return; fi
-
-    read -p "请输入目标机器端口 (1-65535): " TPORT
-    if ! is_valid_port "$TPORT"; then echo "错误: 目标端口无效！"; return; fi
-
-    # 为 TCP 和 UDP 添加规则
-    for proto in tcp udp; do
-        # 移除旧规则（如果存在）通过 handle 或直接匹配（nft 较难直接通过内容删除，建议先清理表再重载或精准管理）
-        # 这里采用简单的规则追加，管理文件用于重载
-        nft add rule ip $NFT_TABLE prerouting $proto dport "$LPORT" dnat to "$TIP:$TPORT"
-        nft add rule ip $NFT_TABLE postrouting ip daddr "$TIP" $proto dport "$TPORT" masquerade
+    local ip=$1
+    [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r i1 i2 i3 i4 <<< "$ip"
+    for i in $i1 $i2 $i3 $i4; do
+        i=$((10#$i)) 2>/dev/null
+        (( i >= 0 && i <= 255 )) || return 1
     done
-
-    # 记录到自定义文件以便管理和重载
-    sed -i "/^$LPORT $TIP $TPORT$/d" "$RULES_FILE" 2>/dev/null || true
-    echo "$LPORT $TIP $TPORT" >> "$RULES_FILE"
-    
-    save_rules
-    echo "转发已成功通过 nftables 添加并生效 ✔"
+    return 0
 }
 
-# -------------------------------
-# 5. 查看转发
-# -------------------------------
-list_rules() {
-    echo
-    echo "==== 当前由本脚本管理的转发记录 ===="
-    if [[ -f "$RULES_FILE" && -s "$RULES_FILE" ]]; then
-        nl -w2 -s'. ' "$RULES_FILE"
+need_root(){
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    err "请使用 root 运行此脚本"
+    exit 1
+  fi
+}
+
+# ===================== NAT 优化核心模块 =====================
+
+precheck(){
+  echo
+  echo -e "${BOLD}【NAT 服务器预检查】${NC}"
+  line
+
+  # 1. 虚拟化环境检测
+  virt_type="unknown"
+  if cmd_exists systemd-detect-virt; then
+    virt_type="$(systemd-detect-virt || true)"
+  elif [[ -f /.dockerenv ]] || grep -q docker /proc/1/cgroup; then
+    virt_type="docker"
+  fi
+
+  if [[ "$virt_type" =~ lxc|docker|openvz ]]; then
+    warn "环境：${virt_type} 容器 (内核参数受限)"
+    info "提示：部分内核参数可能无法修改，脚本将自动忽略报错"
+  else
+    info "环境：$virt_type (支持完整内核参数)"
+  fi
+
+  # 2. 内核与 BBR
+  local kernel_ver="$(uname -r 2>/dev/null || echo unknown)"
+  info "内核版本：$kernel_ver"
+  
+  if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
+    ok "BBR 已启用"
+  else
+    if grep -q bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+       info "内核支持 BBR，稍后将尝试启用"
     else
-        echo "暂无记录"
+       warn "未检测到 BBR 支持 (容器需宿主机开启或内核版本过低)"
     fi
-    echo "===================================="
-    # 可选：显示底层 nftables 规则
-    # nft list table ip $NFT_TABLE
+  fi
+
+  # 3. IP 转发状态
+  if [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" == "1" ]]; then
+    ok "IP 转发已开启"
+  else
+    warn "IP 转发未开启 (将在优化时统一处理)"
+  fi
+
+  # 4. 连接跟踪模块
+  if [[ -f /proc/net/nf_conntrack ]] || sysctl net.netfilter.nf_conntrack_max >/dev/null 2>&1; then
+    ok "连接跟踪 (Conntrack) 模块已加载"
+    local max="$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 0)"
+    info "当前最大连接数限制：$max"
+  else
+    warn "未检测到 Conntrack 模块 (NAT 必需)"
+  fi
+  
+  line
+  ok "预检查完成"
 }
 
-# -------------------------------
-# 6. 删除转发
-# -------------------------------
-delete_rule() {
-    list_rules
-    if [[ ! -f "$RULES_FILE" || ! -s "$RULES_FILE" ]]; then return; fi
+generate_config(){
+  # 根据内存大小动态调整 nf_conntrack_max
+  local mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 1048576)
+  local mem_gb=$((mem_kb / 1024 / 1024))
+  [[ $mem_gb -lt 1 ]] && mem_gb=1
+  
+  local conntrack_max=$((mem_gb * 65536))
+  [[ $conntrack_max -gt 2097152 ]] && conntrack_max=2097152
 
-    read -p "请输入要删除的记录序号: " num
-    if ! [[ "$num" =~ ^[0-9]+$ ]]; then echo "错误: 请输入有效的数字！"; return; fi
+  cat <<EOF
+# ==============================================
+# NAT Server Optimization (Generated by Script)
+# ==============================================
 
-    rule=$(sed -n "${num}p" "$RULES_FILE" 2>/dev/null)
-    if [[ -z "$rule" ]]; then echo "错误: 该序号不存在！"; return; fi
+# --- 核心转发设置 ---
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.route_localnet = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
 
-    # 为了彻底删除，最安全的方式是清理链并根据规则文件重载
-    sed -i "${num}d" "$RULES_FILE"
-    reload_rules
-    echo "记录 $num 已成功删除 ✔"
+# --- 连接跟踪优化 (NAT 核心) ---
+net.netfilter.nf_conntrack_max = $conntrack_max
+net.nf_conntrack_max = $conntrack_max
+
+# 缩短超时时间，加快回收
+net.netfilter.nf_conntrack_tcp_timeout_established = 600
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 60
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 120
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 120
+
+# 更激进的连接回收
+net.netfilter.nf_conntrack_tcp_timeout_syn_recv = 30
+net.netfilter.nf_conntrack_tcp_timeout_syn_sent = 30
+net.netfilter.nf_conntrack_tcp_timeout_unacknowledged = 300
+net.netfilter.nf_conntrack_generic_timeout = 120
+
+# UDP 连接跟踪优化
+net.netfilter.nf_conntrack_udp_timeout = 60
+net.netfilter.nf_conntrack_udp_timeout_stream = 180
+
+# --- TCP/BBR 优化 ---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# --- 防 SYN 洪水 & 连接复用 ---
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_tw_recycle = 0
+
+# --- 缓冲区与队列 (针对高吞吐量转发优化) ---
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.core.optmem_max = 65535
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+net.ipv4.udp_mem = 4096 87380 33554432
+
+# --- 背压与队列优化 ---
+net.core.netdev_max_backlog = 16384
+net.core.somaxconn = 8192
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_collapse_max_bytes = 1048576
+net.ipv4.tcp_autocorking = 1
+net.core.busy_poll = 50
+net.core.busy_read = 50
+
+# --- 端口范围 ---
+net.ipv4.ip_local_port_range = 10240 65535
+
+# --- ARP 缓存 (防止高并发扫段时 ARP 表溢出致命错误) ---
+net.ipv4.neigh.default.gc_thresh1 = 8192
+net.ipv4.neigh.default.gc_thresh2 = 32768
+net.ipv4.neigh.default.gc_thresh3 = 65536
+
+# --- 其他 ---
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+EOF
 }
 
-# -------------------------------
-# 7. 重载规则 (全量刷新)
-# -------------------------------
+optimize_system(){
+  echo
+  echo -e "${BOLD}【系统与网卡深度优化】${NC}"
+  line
+
+  local nic
+  nic="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+  [[ -z "$nic" ]] && nic="eth0"
+  
+  info "当前默认网卡标识: $nic"
+
+  if ! ip link show "$nic" >/dev/null 2>&1; then
+      warn "未检测到有效的物理/虚拟网卡对象 ($nic)，跳过 ethtool 网卡硬件队列优化"
+  else
+      if cmd_exists ethtool; then
+         info "尝试调整网卡 Ring Buffer..."
+         ethtool -G "$nic" rx 4096 tx 4096 >/dev/null 2>&1 || true
+         local rx_val=$(ethtool -g "$nic" 2>/dev/null | grep "RX:" | tail -1 | awk '{print $2}')
+         if [[ "$rx_val" == "4096" ]]; then
+             ok "网卡 Ring Buffer 已成功调整为 4096"
+         else
+             info "网卡不支持 Ring Buffer 调整或已是最大值 (当前: ${rx_val:-未知})"
+         fi
+         
+         local cpu_cores=$(nproc 2>/dev/null || echo 1)
+         info "尝试开启多队列 RSS ($cpu_cores 队列)..."
+         ethtool -L "$nic" combined "$cpu_cores" >/dev/null 2>&1 || true
+      else
+         warn "未找到 ethtool 工具，跳过网卡硬件优化"
+      fi
+  fi
+  
+  if ! cmd_exists irqbalance; then
+      info "正在安装 irqbalance (平衡网卡中断)..."
+      if cmd_exists apt-get; then
+          apt-get update -y >/dev/null 2>&1
+          apt-get install -y irqbalance >/dev/null 2>&1 || warn "irqbalance 安装失败"
+      elif cmd_exists dnf; then
+          dnf install -y irqbalance >/dev/null 2>&1 || warn "irqbalance 安装失败"
+      elif cmd_exists yum; then
+          yum install -y irqbalance >/dev/null 2>&1 || warn "irqbalance 安装失败"
+      fi
+  fi
+  
+  if cmd_exists irqbalance; then
+      systemctl enable --now irqbalance >/dev/null 2>&1 || true
+      if systemctl is-active irqbalance >/dev/null 2>&1; then
+          ok "irqbalance 服务已运行"
+      fi
+  fi
+  
+  info "正在优化文件描述符限制 (ulimit)..."
+  if [[ -f /etc/security/limits.conf ]]; then
+      if grep -q "soft nofile" /etc/security/limits.conf; then
+          sed -i '/soft nofile/d' /etc/security/limits.conf
+          sed -i '/hard nofile/d' /etc/security/limits.conf
+      fi
+      echo "* soft nofile 655350" >> /etc/security/limits.conf
+      echo "* hard nofile 655350" >> /etc/security/limits.conf
+      echo "root soft nofile 655350" >> /etc/security/limits.conf
+      echo "root hard nofile 655350" >> /etc/security/limits.conf
+  fi
+  ulimit -n 655350 >/dev/null 2>&1 || true
+  ok "文件描述符限制已提升 (需重新登录完全生效)"
+}
+
+apply_optimize(){
+  precheck
+  
+  echo
+  echo -e "${BOLD}【应用优化配置】${NC}"
+  line
+
+  mkdir -p "$BACKUP_DIR"
+  
+  if [[ -f "$CONFIG_FILE" ]]; then
+    cp "$CONFIG_FILE" "${BACKUP_DIR}/config_backup_$(date +%F_%H%M%S).conf"
+    info "已备份原有内核配置到 $BACKUP_DIR"
+  fi
+
+  info "正在生成优化配置文件: $CONFIG_FILE"
+  generate_config > "$CONFIG_FILE"
+
+  info "正在应用 sysctl 参数..."
+  if sysctl -p "$CONFIG_FILE" >/dev/null 2>&1; then
+     ok "sysctl 批量应用成功"
+  else
+     warn "sysctl 批量应用部分失败 (正常现象，容器环境会限制部分只读参数)"
+     info "启动逐行强制解析与应用补偿..."
+     
+     while read -r raw_line; do
+        [[ "$raw_line" =~ ^[[:space:]]*# ]] && continue
+        
+        clean_param="${raw_line%%#*}"
+        clean_param="${clean_param//[[:space:]]/}"
+        [[ -z "$clean_param" ]] && continue
+        
+        sysctl -w "$clean_param" >/dev/null 2>&1 || true
+     done < "$CONFIG_FILE"
+     
+     ok "由底层容器限制引发的未决参数已安全跳过，成功参数已应用"
+  fi
+  
+  optimize_system
+
+  local current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+  local current_fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
+  
+  echo
+  echo "--- 状态验证 ---"
+  if [[ "$current_fwd" == "1" ]]; then ok "IP 转发: 开启"; else err "IP 转发: 未开启"; fi
+  if [[ "$current_cc" == "bbr" ]]; then ok "拥塞控制: BBR 生效"; else warn "拥塞控制: $current_cc (可能内核不支持)"; fi
+  
+  line
+  ok "NAT 优化完成！"
+  
+  # 检测 virt_type 的全局变量（如果存在）
+  if [[ "${virt_type:-}" =~ lxc|docker ]]; then
+     echo
+     echo -e "${YELLOW}提示：在 LXC/Proxmox 环境下，强烈建议在母机宿主机开启 BBR 并放开 cgroup 限制以获最佳体验。${NC}"
+  fi
+}
+
+restore_config(){
+  echo
+  echo -e "${BOLD}【还原系统默认配置】${NC}"
+  line
+  
+  if [[ -f "$CONFIG_FILE" ]]; then
+    rm -f "$CONFIG_FILE"
+    info "已删除优化配置文件 $CONFIG_FILE"
+    info "正在重载系统默认配置..."
+    sysctl --system >/dev/null 2>&1 || true
+    ok "已丢弃优化值，恢复系统默认"
+  else
+    warn "未找到优化配置文件，已处于默认状态"
+  fi
+}
+
+nat_optimize_menu(){
+  while true; do
+      echo
+      echo -e "${BOLD}${BLUE}====== NAT 服务器专项优化 (辅助工具) ======${NC}"
+      echo "1. 执行环境预检查"
+      echo "2. 一键应用 NAT 强化优化配置"
+      echo "3. 还原系统默认配置"
+      echo "0. 返回主菜单"
+      read -p "选择 [0-3]: " nat_choice
+      case $nat_choice in
+          1) precheck ;;
+          2) apply_optimize ;;
+          3) restore_config ;;
+          0) return ;;
+          *) print_error "无效选择" ;;
+      esac
+  done
+}
+
+# ===================== nftables 转发核心模块 =====================
+
+install_nftables() {
+    print_info "正在安装 nftables..."
+    if command -v apt >/dev/null; then
+        apt update && apt install -y nftables
+    elif command -v dnf >/dev/null; then
+        dnf install -y nftables
+    elif command -v yum >/dev/null; then
+        yum install -y nftables
+    elif command -v pacman >/dev/null; then
+        pacman -S --noconfirm nftables
+    elif command -v apk >/dev/null; then
+        apk add --no-cache nftables
+    else
+        print_error "不支持的包管理器，请手动安装"
+        exit 1
+    fi
+    systemctl enable --now nftables 2>/dev/null || true
+}
+
+check_env() {
+    if ! command -v nft >/dev/null 2>&1; then
+        print_warn "未检测到 nftables。"
+        read -p "是否自动安装？[y/N] " i
+        [[ "$i" =~ ^[Yy]$ ]] && install_nftables || exit 1
+    fi
+}
+
+setup_system_config() {
+    mkdir -p /etc/nftables
+    if [[ ! -f "$NFT_MAIN_CONF" ]]; then
+        cat > "$NFT_MAIN_CONF" <<'EOF'
+#!/usr/sbin/nft -f
+flush ruleset
+include "/etc/nftables/throttle_forward.nft"
+EOF
+    elif ! grep -q "throttle_forward.nft" "$NFT_MAIN_CONF"; then
+        echo 'include "/etc/nftables/throttle_forward.nft"' >> "$NFT_MAIN_CONF"
+    fi
+}
+
+init_nft() {
+    # 只确保基本的 ip_forward 开启，不覆盖更详细的 sysctl 优化
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    sed -i '/^[[:space:]]*net\.ipv4\.ip_forward/d' /etc/sysctl.conf 2>/dev/null || true
+    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+
+    nft add table ip $NFT_TABLE 2>/dev/null || true
+    nft add chain ip $NFT_TABLE prerouting { type nat hook prerouting priority dstnat \; policy accept \; } 2>/dev/null || true
+    nft add chain ip $NFT_TABLE postrouting { type nat hook postrouting priority srcnat \; policy accept \; } 2>/dev/null || true
+}
+
+save_forward_rules() {
+    nft list table ip $NFT_TABLE > "$NFT_FORWARD_FILE" 2>/dev/null
+}
+
+clean_rules() {
+    [[ -f "$RULES_FILE" ]] && sed -i '/^[[:space:]]*$/d; /^[[:space:]]*#/d' "$RULES_FILE"
+}
+
 reload_rules() {
-    echo "正在刷新 nftables 转发规则..."
-    # 清理旧有的自定义表
-    nft delete table ip $NFT_TABLE 2>/dev/null
-    
-    # 重新初始化
+    print_info "正在重载 nftables 转发规则..."
+    nft delete table ip $NFT_TABLE 2>/dev/null || true
     init_nft
 
-    # 从文件加载
+    clean_rules
     if [[ -f "$RULES_FILE" ]]; then
-        while read -r LPORT TIP TPORT; do
-            [[ -z "$LPORT" ]] && continue
-            for proto in tcp udp; do
-                nft add rule ip $NFT_TABLE prerouting $proto dport "$LPORT" dnat to "$TIP:$TPORT"
-                nft add rule ip $NFT_TABLE postrouting ip daddr "$TIP" $proto dport "$TPORT" masquerade
+        while read -r LPORT TIP TPORT PROTO IFACE SIP || [[ -n $LPORT ]]; do
+            [[ -z "$LPORT" || "$LPORT" == \#* ]] && continue
+            
+            [[ -z "$PROTO" || "$PROTO" == "any" ]] && PROTO="tcp/udp"
+            local protos=()
+            if [[ "$PROTO" == "tcp/udp" ]]; then
+                protos=(tcp udp)
+            else
+                protos=($PROTO)
+            fi
+
+            local pre_opts=""
+            [[ -n "$IFACE" && "$IFACE" != "any" ]] && pre_opts="iifname $IFACE "
+            [[ -n "$SIP" && "$SIP" != "any" ]] && pre_opts="${pre_opts}ip saddr $SIP "
+            
+            for p in "${protos[@]}"; do
+                nft add rule ip $NFT_TABLE prerouting ${pre_opts}${p} dport "$LPORT" dnat to "$TIP:$TPORT" 2>/dev/null
+                nft add rule ip $NFT_TABLE postrouting ip daddr "$TIP" ${p} dport "$TPORT" masquerade 2>/dev/null
             done
         done < "$RULES_FILE"
     fi
-
-    save_rules
-    echo "规则重载完毕 ✔"
+    save_forward_rules
+    print_success "规则重载完毕"
 }
 
-# -------------------------------
-# 主菜单
-# -------------------------------
-menu() {
-    echo
-    echo "====== nftables 端口转发管理 ======"
-    echo "1. 添加转发"
-    echo "2. 查看转发"
-    echo "3. 删除转发"
-    echo "4. 重载规则 (全量刷新)"
-    echo "5. 退出"
-    echo "==================================="
-    read -p "请输入对应数字选择: " choice
+add_rule() {
+    print_info "=== 添加端口转发 ==="
+    read -p "本地端口: " LPORT
+    is_valid_port "$LPORT" || { print_error "端口无效"; return; }
 
-    case $choice in
-        1) add_rule ;;
-        2) list_rules ;;
-        3) delete_rule ;;
-        4) reload_rules ;;
-        5) exit 0 ;;
-        *) echo "无效选择，请重新输入" ;;
+    echo -e "\n选择转发协议:"
+    echo "1. TCP"
+    echo "2. UDP"
+    echo "3. TCP+UDP"
+    read -p "选择 [1-3] (默认: 3): " p_choice
+    case "$p_choice" in
+        1) PROTO="tcp" ;;
+        2) PROTO="udp" ;;
+        *) PROTO="tcp/udp" ;;
     esac
+
+    read -p "目标 IP: " TIP
+    is_valid_ip "$TIP" || { print_error "IP 无效"; return; }
+
+    read -p "目标端口: " TPORT
+    is_valid_port "$TPORT" || { print_error "端口无效"; return; }
+
+    echo ""
+    print_info "高级选项 (直接回车保持默认)"
+    read -p "来源 IP 白名单 (留空=允许所有): " SIP
+    if [[ -n "$SIP" && "$SIP" != "any" ]]; then
+        is_valid_ip "$SIP" || { print_error "IP 无效"; return; }
+    else
+        SIP="any"
+    fi
+
+    local ifaces=($(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d'@' -f1 | grep -v '^lo$'))
+    echo -e "\n可用网卡列表:"
+    echo "0. any (所有网卡)"
+    for ((i=0; i<${#ifaces[@]}; i++)); do
+        echo "$((i+1)). ${ifaces[$i]}"
+    done
+    read -p "绑定的外网网卡序号 [0-$(( ${#ifaces[@]} ))] (留空=0): " i_choice
+    if [[ -n "$i_choice" && "$i_choice" =~ ^[0-9]+$ && "$i_choice" -ge 1 && "$i_choice" -le ${#ifaces[@]} ]]; then
+        IFACE="${ifaces[$((i_choice-1))]}"
+    else
+        IFACE="any"
+    fi
+
+    clean_rules
+    sed -i "/^$LPORT /d" "$RULES_FILE" 2>/dev/null || true
+    echo "$LPORT $TIP $TPORT $PROTO $IFACE $SIP" >> "$RULES_FILE"
+
+    reload_rules
+    print_success "转发 $LPORT -> $TIP:$TPORT [$PROTO] 添加成功"
 }
 
-# -------------------------------
-# 启动逻辑
-# -------------------------------
-if [[ $EUID -ne 0 ]]; then
-   echo "错误: 本脚本必须以 root 权限运行 (请使用 sudo)" 
-   exit 1
-fi
+list_rules() {
+    echo
+    print_info "==== 当前转发规则 ===="
+    clean_rules
+    if [[ -f "$RULES_FILE" && -s "$RULES_FILE" ]]; then
+        awk '{
+            proto=$4!="" ? $4 : "tcp/udp"
+            iface=$5!="" ? $5 : "any"
+            sip=$6!="" ? $6 : "any"
+            printf "%d. 本地端口: %-5s -> %s:%-5s | 协议: %-7s | 接口: %-6s | 来源IP: %s\n", NR, $1, $2, $3, toupper(proto), iface, sip
+        }' "$RULES_FILE"
+    else
+        echo "  暂无记录"
+    fi
+}
+
+delete_rule() {
+    list_rules
+    [[ ! -f "$RULES_FILE" || ! -s "$RULES_FILE" ]] && return
+    echo
+    read -p "删除序号: " num
+    if [[ "$num" =~ ^[0-9]+$ ]]; then
+        mapfile -t lines < "$RULES_FILE"
+        if [ "$num" -ge 1 ] && [ "$num" -le "${#lines[@]}" ]; then
+            unset 'lines[num-1]'
+            > "$RULES_FILE"
+            for line in "${lines[@]}"; do
+                [[ -n "$line" ]] && echo "$line" >> "$RULES_FILE"
+            done
+            reload_rules
+            print_success "删除完成"
+            return
+        fi
+    fi
+    print_error "无效的序号，未进行任何操作"
+}
+
+main_menu() {
+    while true; do
+        echo
+        echo -e "${BLUE}====== nftables 转发 & NAT 优化 (二合一版 v4.0) ======${NC}"
+        echo "1. 添加转发规则"
+        echo "2. 查看当前转发"
+        echo "3. 删除转发规则"
+        echo "4. 强制重载转发"
+        echo "------------------------------------------------------"
+        echo -e "${YELLOW}5. ★ NAT 服务器一键优化 (强烈推荐) ★${NC}"
+        echo "------------------------------------------------------"
+        echo "0. 退出"
+        read -p "选择 [0-5]: " choice
+        case $choice in
+            1) add_rule ;;
+            2) list_rules ;;
+            3) delete_rule ;;
+            4) reload_rules ;;
+            5) nat_optimize_menu ;;
+            0) exit 0 ;;
+            *) print_error "无效选择" ;;
+        esac
+    done
+}
+
+# ===================== 入口启动逻辑 =====================
+need_root
 
 check_env
+setup_system_config
 init_nft
+[[ -f "$RULES_FILE" ]] && reload_rules || touch "$RULES_FILE"
 
-while true; do
-    menu
-done
+print_success "系统初始化及脚本加载成功"
+
+# 启动主循环
+main_menu
