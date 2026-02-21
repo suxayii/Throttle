@@ -15,7 +15,7 @@ This project provides a set of efficient, easy-to-use Linux server network manag
   - [3. BBR Optimization Script (bbr.sh)](#3-bbr-optimization-script-bbrsh)
   - [4. GOST Proxy Script (gost-proxy.sh)](#4-gost-proxy-script-gost-proxysh)
   - [5. NAT Optimization Script (nat_optimize.sh)](#5-nat-optimization-script-nat_optimizesh)
-  - [6. iptables Port Forwarding (iptables-forward.sh)](#6-iptables-port-forwarding-iptables-forwardsh)
+  - [6. nftables Port Forwarding (nft-forward.sh)](#6-nftables-port-forwarding-nft-forwardsh)
 - [🚀 Quick Start](#-quick-start)
 - [📋 System Requirements](#-system-requirements)
 - [🤝 Contributing](#-contributing)
@@ -86,13 +86,13 @@ Depth optimization tool designed for NAT forwarding servers, especially for LXC/
     -   **BBR/Queue Optimization**: Automatically enables BBR + FQ and optimizes UDP buffers.
     -   **System Tuning**: Adjusts Ring Buffer, enables RSS, installs irqbalance, and increases file descriptor limits.
 
-### 6. iptables Port Forwarding (`iptables-forward.sh`)
-An iptables-based port forwarding management tool, providing a safely reconstructed forwarding solution with persistence support.
+### 6. nftables Port Forwarding (`nft-forward.sh`)
+An nftables-based port forwarding management tool, providing a modern forwarding solution with persistence support.
 
 -   **Key Features**:
-    -   **Safe Reconstruction**: Uses a "delete-then-add" logic to ensure no interference with existing NAT rules like Docker.
+    -   **Table Isolation**: Uses a dedicated `nftables` table for management, ensuring no interference with other system rules.
     -   **Protocol Support**: Supports both TCP and UDP port forwarding.
-    -   **Rule Persistence**: Adapts to native persistence solutions for Debian/Ubuntu (netfilter-persistent) and CentOS (iptables-services).
+    -   **Rule Persistence**: Automatically saves rules to standard paths, ensuring survival across reboots.
     -   **User-friendly Menu**: Provides an interactive menu for adding, listing, deleting, and reloading rules.
     -   **Auto-Check**: Automatically detects and configures kernel forwarding and necessary tools.
 
@@ -137,9 +137,9 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nat_optimize.sh)
 ```
 
-#### 6. iptables Port Forwarding
+#### 6. nftables Port Forwarding
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/iptables-forward.sh)
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nft-forward.sh)
 ```
 
 ---

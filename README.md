@@ -15,7 +15,7 @@
   - [3. BBR 网络优化脚本 (bbr.sh)](#3-bbr-网络优化脚本-bbrsh)
   - [4. GOST 代理部署脚本 (gost-proxy.sh)](#4-gost-代理部署脚本-gost-proxysh)
   - [5. NAT 专用优化脚本 (nat_optimize.sh)](#5-nat-专用优化脚本-nat_optimizesh)
-  - [6. iptables 端口转发管理 (iptables-forward.sh)](#6-iptables-端口转发管理-iptables-forwardsh)
+  - [6. nftables 端口转发管理 (nft-forward.sh)](#6-nftables-端口转发管理-nft-forwardsh)
 - [🚀 快速开始](#-快速开始)
 - [📋 系统要求](#-系统要求)
 - [🤝 贡献与反馈](#-贡献与反馈)
@@ -87,13 +87,13 @@
     -   **BBR/队列优化**：自动启用 BBR + FQ，优化 UDP 缓冲区以支持 QUIC/Hysteria。
     -   **网卡/系统调优**：自动调整 Ring Buffer、启用多队列 RSS、安装 irqbalance 及提升文件描述符限制。
 
-### 6. iptables 端口转发管理 (`iptables-forward.sh`)
-基于 `iptables` 的端口转发管理工具，提供安全重构的转发方案，支持持久化。
+### 6. nftables 端口转发管理 (`nft-forward.sh`)
+基于 `nftables` 的端口转发管理工具，提供现代化的转发方案，支持持久化。
 
 -   **核心功能**：
-    -   **安全重构**：采用先删后加逻辑，确保不干扰 Docker 等系统现有 NAT 规则。
+    -   **表隔离**：使用专用 `nftables` 表管理，不影响系统其他网络规则。
     -   **协议支持**：同时支持 TCP 和 UDP 的端口转发。
-    -   **规则持久化**：适配 Debian/Ubuntu (netfilter-persistent) 与 CentOS (iptables-services) 原生持久化方案。
+    -   **规则持久化**：自动保存规则至标准路径，确保重启不丢失。
     -   **易用菜单**：提供添加、查看、删除、重载等交互式管理菜单。
     -   **环境自检**：自动检测并配置内核转发与必要工具。
 
@@ -138,9 +138,9 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nat_optimize.sh)
 ```
 
-#### 6. iptables 端口转发
+#### 6. nftables 端口转发
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/iptables-forward.sh)
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nft-forward.sh)
 ```
 
 ---
