@@ -4,6 +4,8 @@
 # 版本: v4.0
 # =========================================================
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 # ===================== 基础设置变量 =====================
 # 转发相关
 RULES_FILE="/etc/nft-forward-rules.conf"
@@ -479,12 +481,7 @@ add_rule() {
 
     echo ""
     print_info "高级选项 (直接回车保持默认)"
-    read -p "来源 IP 白名单 (留空=允许所有): " SIP
-    if [[ -n "$SIP" && "$SIP" != "any" ]]; then
-        is_valid_ip "$SIP" || { print_error "IP 无效"; return; }
-    else
-        SIP="any"
-    fi
+    SIP="any"
 
     local ifaces=($(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d'@' -f1 | grep -v '^lo$'))
     echo -e "\n可用网卡列表:"
@@ -515,8 +512,7 @@ list_rules() {
         awk '{
             proto=$4!="" ? $4 : "tcp/udp"
             iface=$5!="" ? $5 : "any"
-            sip=$6!="" ? $6 : "any"
-            printf "%d. 本地端口: %-5s -> %s:%-5s | 协议: %-7s | 接口: %-6s | 来源IP: %s\n", NR, $1, $2, $3, toupper(proto), iface, sip
+            printf "%d. 本地端口: %-5s -> %s:%-5s | 协议: %-7s | 接口: %-6s\n", NR, $1, $2, $3, toupper(proto), iface
         }' "$RULES_FILE"
     else
         echo "  暂无记录"
