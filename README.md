@@ -24,8 +24,8 @@
 
 ## 🛠️ 核心工具
 
-### 1. Net Tune Pro v3 (`install.sh`)
-**推荐！最强大的全功能网络优化方案管理器。** 整合了多种预设优化方案，支持原子化配置与版本保护。
+### 1. Net Tune Pro v3 (`net-tune-pro-v3-zh.sh`)
+**推荐！最强大的全功能网络优化方案管理器。** 整合了多种预设优化方案，支持原子化配置与版本保护。现已更新至 v3.3.1，新增 s-ui Hysteria2 专项优化。
 
 -   **核心功能**：
     -   **12 种优化方案**：
@@ -34,7 +34,7 @@
         | **平衡版** | 通用推荐 (默认) |
         | **激进版** | 高并发 / 高 PPS 场景 |
         | **激进稳妥版** | 推荐的激进配置 (兼顾稳定性) |
-        | **UDP 专项版** | QUIC / Hysteria2 / TUIC 优化 |
+        | **UDP 专项版** | **(核心)** s-ui Hysteria2 生产极致版 |
         | **流媒体代理版** | VLESS / Reality TCP 优化 |
         | **HTTP 代理版** | Squid / Nginx / Clutch 代理优化 |
         | **低内存版 (1C/1G)** | 小内存 VPS (防 OOM) |
@@ -102,9 +102,9 @@ chmod +x *.sh
 
 ### 方式二：一键命令运行
 
-#### 1. Net Tune Pro v3 (全能优化方案 - 推荐)
+#### 1. Net Tune Pro v3 (全能优化方案 - v3.3.1 推荐)
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/install.sh)
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/net-tune-pro-v3-zh.sh)
 ```
 
 #### 2. 端口限速

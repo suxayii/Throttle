@@ -24,8 +24,8 @@ This project provides a set of efficient, easy-to-use Linux server network manag
 
 ## 🛠️ Core Tools
 
-### 1. Net Tune Pro v3 (`install.sh`)
-**Recommended! The most powerful all-in-one network optimization profile manager.** Integrates various preset optimization plans with atomic configuration and version protection.
+### 1. Net Tune Pro v3 (`net-tune-pro-v3-zh.sh`)
+**Recommended! The most powerful all-in-one network optimization profile manager.** Integrates various preset optimization plans with atomic configuration and version protection. Updated to v3.3.1 with specialized s-ui Hysteria2 optimization.
 
 -   **Key Features**:
     -   **12 Optimization Profiles**:
@@ -34,7 +34,7 @@ This project provides a set of efficient, easy-to-use Linux server network manag
         | **Balanced** | General purpose (Recommended) |
         | **Aggressive** | High Concurrency / High PPS |
         | **Aggressive Safe** | Balanced Aggressive (Stable) |
-        | **UDP/QUIC** | QUIC / Hysteria2 / TUIC Optimization |
+        | **UDP/QUIC** | **(Core)** s-ui Hysteria2 Production Extreme |
         | **Streaming** | VLESS / Reality TCP Optimization |
         | **HTTP Proxy** | Squid / Nginx / Clutch Proxy Optimization |
         | **Low Memory (1C/1G)** | Small RAM VPS (Prevent OOM) |
@@ -101,9 +101,9 @@ chmod +x *.sh
 
 ### Method 2: One-Click Command
 
-#### 1. Net Tune Pro v3 (All-in-one Optimization - Recommended)
+#### 1. Net Tune Pro v3 (All-in-one Optimization - v3.3.1 Recommended)
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/install.sh)
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/net-tune-pro-v3-zh.sh)
 ```
 
 #### 2. Port Throttling
