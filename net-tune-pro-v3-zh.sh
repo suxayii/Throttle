@@ -151,28 +151,35 @@ profile_udp_quic(){
     elif [ "$TOTAL_MEM" -ge 8192 ]; then
         RMAX=67108864       # 64MB（8G+ 推荐）
         echo "# 检测到 ≥8G 内存 → 64MB缓冲"
+    elif [ "$TOTAL_MEM" -ge 4096 ]; then
+        RMAX=33554432       # 32MB（4G+ 安全）
+        echo "# 检测到 ≥4G 内存 → 32MB缓冲"
     else
-        RMAX=33554432       # 32MB（低配安全）
-        echo "# 检测到低内存 → 32MB缓冲"
+        RMAX=16777216       # 16MB（低配极简）
+        echo "# 检测到低内存 → 16MB缓冲"
     fi
 
 cat <<CONF
 # UDP专项 - s-ui Hysteria2 生产极致配置（东京GIA/AS9929优化）
-net.core.rmem_default = $RMAX
+net.core.rmem_default = 262144
 net.core.rmem_max = $((RMAX * 2))
-net.core.wmem_default = $RMAX
+net.core.wmem_default = 262144
 net.core.wmem_max = $((RMAX * 2))
+
+# TCP 必然共存：s-ui 面板/DNS/伪装站
+net.ipv4.tcp_rmem = 4096 87380 $RMAX
+net.ipv4.tcp_wmem = 4096 65536 $RMAX
 
 # UDP专属关键参数（QUIC 带宽利用率核心）
 net.ipv4.udp_mem = 8388608 12582912 16777216
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 
-# s-ui 高并发优化（百万连接场景）
-net.core.netdev_max_backlog = 20000
+# s-ui 高并发优化（QUIC高PPS特性）
+net.core.netdev_max_backlog = 65536
 net.core.somaxconn = 8192
 net.ipv4.tcp_max_syn_backlog = 8192
-net.core.optmem_max = 524288
+net.core.optmem_max = 262144
 
 # 端口复用 + 快速回收（Hysteria2 短连接密集）
 net.ipv4.ip_local_port_range = 1024 65535
@@ -409,15 +416,19 @@ validate_profile_semantics(){
         warn "检测到 rmem_max ($((rmem_max/1024/1024))MB) 超过系统建议值 ($((max_allowed_kb/1024))MB)"
         info "已自动调整 rmem_max 为安全值..."
         sed -i "s/^net.core.rmem_max.*/net.core.rmem_max = $((max_allowed_kb * 1024))/" "$tmp"
-        # 同时调整 tcp_rmem 最大值
-        sed -i "s/^net.ipv4.tcp_rmem.*/net.ipv4.tcp_rmem = 4096 87380 $((max_allowed_kb * 1024))/" "$tmp"
+        # 同时尝试调整 tcp_* 最大值（如果预置方案包含）
+        if grep -q "^net\.ipv4\.tcp_rmem" "$tmp"; then
+            sed -i "s/^net.ipv4.tcp_rmem.*/net.ipv4.tcp_rmem = 4096 87380 $((max_allowed_kb * 1024))/" "$tmp"
+        fi
     fi
     if (( wmem_max_kb > max_allowed_kb )); then
         warn "检测到 wmem_max ($((wmem_max/1024/1024))MB) 超过系统建议值 ($((max_allowed_kb/1024))MB)"
         info "已自动调整 wmem_max 为安全值..."
         sed -i "s/^net.core.wmem_max.*/net.core.wmem_max = $((max_allowed_kb * 1024))/" "$tmp"
-        # 同时调整 tcp_wmem 最大值
-        sed -i "s/^net.ipv4.tcp_wmem.*/net.ipv4.tcp_wmem = 4096 65536 $((max_allowed_kb * 1024))/" "$tmp"
+        # 同时尝试调整 tcp_* 最大值（如果预置方案包含）
+        if grep -q "^net\.ipv4\.tcp_wmem" "$tmp"; then
+            sed -i "s/^net.ipv4.tcp_wmem.*/net.ipv4.tcp_wmem = 4096 65536 $((max_allowed_kb * 1024))/" "$tmp"
+        fi
     fi
   fi
 
@@ -856,11 +867,10 @@ apply_profile(){
       mkdir -p /etc/systemd/system/s-ui.service.d
       cat > /etc/systemd/system/s-ui.service.d/udp-priority.conf << EOF
 [Service]
-CPUSchedulingPolicy=rr
-CPUSchedulingPriority=99
-Nice=-20
+CPUSchedulingPolicy=other
+Nice=-10
+IOSchedulingClass=best-effort
 IOSchedulingPriority=0
-IOSchedulingClass=realtime
 LimitNOFILE=1048576
 LimitNPROC=1048576
 EOF
