@@ -19,7 +19,7 @@ CURRENT_PROFILE=""
 ARCH="$(uname -m)"
 
 # 版本号
-VERSION="3.3.1-sui-hysteria2"
+VERSION="3.3.2-sui-hysteria2-auto-opt"
 
 # ===================== 颜色 =====================
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -77,6 +77,34 @@ ensure_bbr_deps_debian(){
     }
     ok "依赖安装完成"
   fi
+}
+
+ensure_mtr(){
+  if cmd_exists mtr; then
+    return 0
+  fi
+
+  info "未检测到 mtr，正在尝试自动安装..."
+  if is_debian_like; then
+    apt-get update -y >/dev/null 2>&1 || true
+    if apt-get install -y mtr-tiny >/dev/null 2>&1 || apt-get install -y mtr >/dev/null 2>&1; then
+      ok "mtr 安装成功"
+      return 0
+    fi
+  elif cmd_exists yum; then
+    if yum install -y mtr >/dev/null 2>&1; then
+      ok "mtr 安装成功"
+      return 0
+    fi
+  elif cmd_exists dnf; then
+    if dnf install -y mtr >/dev/null 2>&1; then
+      ok "mtr 安装成功"
+      return 0
+    fi
+  fi
+
+  err "mtr 自动安装失败，请手动安装后重试。"
+  return 1
 }
 
 # ===================== 网络优化方案模板 =====================
@@ -915,6 +943,111 @@ EOF
       info "正在自动启用 BBR + FQ (默认推荐)..."
       bbr_qdisc_apply "bbr" "fq" || true
   fi
+}
+
+mtr_probe_target(){
+  local ip="$1"
+  local report_line loss avg stdev
+
+  report_line="$(mtr -r -c 10 -n "$ip" 2>/dev/null | awk '/^[[:space:]]*[0-9]+\./{line=$0} END{print line}')"
+  if [[ -z "$report_line" ]]; then
+    return 1
+  fi
+
+  # mtr 报告常见列：Loss% Snt Last Avg Best Wrst StDev
+  # 这里输出：loss avg jitter(stdev)
+  read -r loss avg stdev < <(echo "$report_line" | awk '{
+    l=$3; gsub(/%/,"",l);
+    a=$5;
+    j=$9;
+    if (l ~ /^[0-9.]+$/ && a ~ /^[0-9.]+$/ && j ~ /^[0-9.]+$/) {
+      printf "%s %s %s\n", l, a, j;
+    }
+  }')
+
+  if [[ -z "${loss:-}" || -z "${avg:-}" || -z "${stdev:-}" ]]; then
+    return 1
+  fi
+
+  echo "$loss $avg $stdev"
+}
+
+auto_optimize(){
+  echo
+  echo -e "${BOLD}【智能检测与自动优化（HY2/VPS）】${NC}"
+  line
+
+  local total_mem_mb cpu_cores
+  total_mem_mb="$(free -m | awk '/^Mem:/{print $2}' 2>/dev/null || echo 0)"
+  cpu_cores="$(nproc 2>/dev/null || echo 1)"
+  info "内存：${total_mem_mb} MB"
+  info "CPU 核数：${cpu_cores}"
+
+  ensure_mtr || return 1
+
+  # 线路测试点：阿里DNS、114DNS、中国移动骨干（安徽）
+  local test_ips=("223.5.5.5" "114.114.114.114" "112.28.209.196")
+  local count=0
+  local sum_rtt="0" sum_jitter="0" sum_loss="0"
+
+  for ip in "${test_ips[@]}"; do
+    local result loss avg jitter
+    info "mtr 测试目标：$ip"
+    result="$(mtr_probe_target "$ip" || true)"
+    if [[ -z "$result" ]]; then
+      warn "mtr 解析失败：$ip（已跳过）"
+      continue
+    fi
+
+    read -r loss avg jitter <<< "$result"
+    info "结果：RTT(avg)=${avg}ms, jitter(stdev)=${jitter}ms, loss=${loss}%"
+
+    sum_rtt="$(awk -v a="$sum_rtt" -v b="$avg" 'BEGIN{printf "%.3f", a+b}')"
+    sum_jitter="$(awk -v a="$sum_jitter" -v b="$jitter" 'BEGIN{printf "%.3f", a+b}')"
+    sum_loss="$(awk -v a="$sum_loss" -v b="$loss" 'BEGIN{printf "%.3f", a+b}')"
+    count=$((count + 1))
+  done
+
+  local avg_rtt avg_jitter avg_loss
+  if (( count > 0 )); then
+    avg_rtt="$(awk -v s="$sum_rtt" -v c="$count" 'BEGIN{printf "%.2f", s/c}')"
+    avg_jitter="$(awk -v s="$sum_jitter" -v c="$count" 'BEGIN{printf "%.2f", s/c}')"
+    avg_loss="$(awk -v s="$sum_loss" -v c="$count" 'BEGIN{printf "%.2f", s/c}')"
+  else
+    warn "mtr 测试全部失败，按普通高延迟线路处理"
+    avg_rtt="200.00"
+    avg_jitter="30.00"
+    avg_loss="2.00"
+  fi
+
+  info "线路均值：RTT=${avg_rtt}ms, jitter=${avg_jitter}ms, loss=${avg_loss}%"
+
+  local selected_profile="udp_quic"
+  local reason="默认 HY2 UDP 专项"
+
+  if (( total_mem_mb < 2048 || cpu_cores < 2 )); then
+    selected_profile="low_1c1g"
+    reason="资源较低（<2GB 或 <2核）"
+  elif (( total_mem_mb < 4096 )); then
+    selected_profile="low_2c2g"
+    reason="内存低于 4GB"
+  elif awk -v r="$avg_rtt" -v j="$avg_jitter" -v l="$avg_loss" 'BEGIN{exit !((r>150) || (j>20) || (l>1.0))}'; then
+    selected_profile="peak_jitter"
+    reason="线路高延迟/高抖动/有丢包"
+  fi
+
+  warn "推荐方案：$(get_profile_name "$selected_profile")（原因：$reason）"
+  read -rp "是否立即应用该方案？[Y/n]: " yn
+  if [[ -n "${yn:-}" && ! "${yn}" =~ ^[Yy]$ ]]; then
+    warn "已取消应用"
+    return 0
+  fi
+
+  precheck || return 1
+  conflict_check
+  apply_profile "$selected_profile" || return 1
+
+  ok "智能优化完成：已应用 $(get_profile_name "$selected_profile")"
 }
 
 # ===================== BBR 功能（中文） =====================
@@ -1845,6 +1978,7 @@ main_menu(){
     echo "13) Swap 优化（关闭/降低 swappiness）"
     echo "14) 更新脚本"
     echo "15) 查看当前优化规则"
+    echo "16) 智能检测与自动优化（硬件 + mtr 线路）"
     echo "0) 退出"
     line
     read -rp "请输入选项: " ch
@@ -1872,6 +2006,7 @@ main_menu(){
       13) optimize_swap; pause ;;
       14) update_script; pause ;;
       15) view_current_rules ;;
+      16) auto_optimize; pause ;;
       0) ok "已退出"; exit 0 ;;
       *) warn "无效输入"; sleep 1 ;;
     esac
