@@ -1,4 +1,3 @@
-cat > /root/net-tune-pro-v3-zh.sh << 'FULL_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -159,8 +158,18 @@ profile_udp_quic(){
         echo "# 检测到低内存 → 16MB缓冲"
     fi
 
+    # UDP 内存三元组按实际物理内存动态计算（单位：页=4KB）
+    local TOTAL_PAGES=$(( TOTAL_MEM * 256 ))  # MB → 页(4KB)
+    local UDP_MIN=$(( TOTAL_PAGES / 4 ))
+    local UDP_PRESSURE=$(( TOTAL_PAGES / 3 ))
+    local UDP_MAX=$(( TOTAL_PAGES / 2 ))
+    # 设置合理下限，避免极低配机器值过小
+    [ "$UDP_MIN" -lt 65536 ] && UDP_MIN=65536
+    [ "$UDP_PRESSURE" -lt 131072 ] && UDP_PRESSURE=131072
+    [ "$UDP_MAX" -lt 262144 ] && UDP_MAX=262144
+
 cat <<CONF
-# UDP专项 - s-ui Hysteria2 生产极致配置（东京GIA/AS9929优化）
+# UDP专项 - s-ui Hysteria2 生产极致配置（全线路通用优化）
 net.core.rmem_default = 262144
 net.core.rmem_max = $((RMAX * 2))
 net.core.wmem_default = 262144
@@ -170,8 +179,8 @@ net.core.wmem_max = $((RMAX * 2))
 net.ipv4.tcp_rmem = 4096 87380 $RMAX
 net.ipv4.tcp_wmem = 4096 65536 $RMAX
 
-# UDP专属关键参数（QUIC 带宽利用率核心）
-net.ipv4.udp_mem = 8388608 12582912 16777216
+# UDP专属关键参数（QUIC 带宽利用率核心，按实际内存动态计算）
+net.ipv4.udp_mem = $UDP_MIN $UDP_PRESSURE $UDP_MAX
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 
@@ -187,9 +196,28 @@ net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_notsent_lowat = 16384
 
-# QUIC 软中断预算（降低抖动）
-net.core.netdev_budget = 800
-net.core.netdev_budget_usecs = 20000
+# ---- 非GIA线路 UDP 增强（普通CN2/联通/移动直连等高丢包线路）----
+# ECN 显式拥塞通知：避免丢包式拥塞感知，QUIC/TCP 均受益
+net.ipv4.tcp_ecn = 1
+# SACK 选择性确认 + 时间戳：高丢包环境下精准重传
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_window_scaling = 1
+# 快速重传：TLP（尾丢探测）+ 早期重传，减少 RTO 等待
+net.ipv4.tcp_early_retrans = 3
+# 乱序容忍：非GIA线路包乱序概率高，避免误判为丢包
+net.ipv4.tcp_reordering = 6
+# RACK 丢包检测：替代传统 dupack，对乱序+丢包场景更精准
+net.ipv4.tcp_recovery = 1
+
+# ---- 晚高峰自适应增强 ----
+# 加大软中断预算：高峰期包量暴增时内核有足够处理时间
+net.core.netdev_budget = 1200
+net.core.netdev_budget_usecs = 25000
+# 连接快速回收：高峰期 TIME_WAIT 堆积会耗尽端口
+net.ipv4.tcp_max_tw_buckets = 65536
+# 孤儿连接上限：防止半关闭连接占满内存
+net.ipv4.tcp_max_orphans = 32768
 CONF
 }
 profile_low_1c1g(){ cat <<'CONF'
@@ -862,8 +890,8 @@ apply_profile(){
   ok "方案已应用：$p"
   log "APPLY profile=$p success"
 
-  # === s-ui 面板专用实时优先级（UDP专项版自动触发）===
-  if systemctl is-active s-ui.service >/dev/null 2>&1; then
+  # === s-ui 面板专用优化（仅 UDP 专项版触发）===
+  if [[ "$p" == "udp_quic" ]] && systemctl is-active s-ui.service >/dev/null 2>&1; then
       mkdir -p /etc/systemd/system/s-ui.service.d
       cat > /etc/systemd/system/s-ui.service.d/udp-priority.conf << EOF
 [Service]
@@ -871,13 +899,13 @@ CPUSchedulingPolicy=other
 Nice=-10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=0
-LimitNOFILE=1048576
-LimitNPROC=1048576
+LimitNOFILE=524288
+LimitNPROC=65536
 EOF
       systemctl daemon-reload
       systemctl restart s-ui.service
-      echo "# s-ui.service 已设为 RR99 + Nice -20（实时调度）"
-  else
+      ok "s-ui.service 已优化：Nice=-10 + 文件描述符 524288"
+  elif [[ "$p" == "udp_quic" ]]; then
       warn "未检测到 s-ui.service，请手动确认服务状态"
   fi
 
@@ -1525,6 +1553,7 @@ system_optimize_menu(){
   line
   read -rp "请输入选项: " choice
   case "$choice" in
+    1) apply_system_optimizations; pause ;;
     2) apply_system_optimizations "persist"; pause ;;
     3) restore_system_optimizations; pause ;;
     4) clear_tc_rules; pause ;;
@@ -1655,6 +1684,8 @@ AWK_EOF
 }
 
 # ===================== 脚本更新 =====================
+SCRIPT_PATH="/root/net-tune-pro-v3-zh.sh"
+
 update_script(){
   echo
   echo -e "${BOLD}【脚本更新】${NC}"
@@ -1662,7 +1693,7 @@ update_script(){
   info "当前版本：$VERSION"
   info "正在检查新版本..."
 
-  local update_url="https://raw.githubusercontent.com/suxayii/Throttle/master/install.sh"
+  local update_url="https://raw.githubusercontent.com/suxayii/Throttle/master/net-tune-pro-v3-zh.sh"
   local tmp_file="/tmp/net-tune-pro-update.sh"
 
   if cmd_exists curl; then
@@ -1681,7 +1712,7 @@ update_script(){
   fi
 
   # 简单的内容比对
-  if cmp -s "$0" "$tmp_file"; then
+  if [[ -f "$SCRIPT_PATH" ]] && cmp -s "$SCRIPT_PATH" "$tmp_file"; then
     ok "当前已是最新版本"
     rm -f "$tmp_file"
     return 0
@@ -1694,11 +1725,11 @@ update_script(){
     info "发现新版本：$new_ver"
     read -rp "是否更新脚本？[y/N]: " yn
     if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
-      mv "$tmp_file" "$0"
-      chmod +x "$0"
-      ok "脚本更新成功，即将重新加载..."
+      install -m 0755 "$tmp_file" "$SCRIPT_PATH"
+      rm -f "$tmp_file"
+      ok "脚本已更新到 $SCRIPT_PATH，即将重新加载..."
       sleep 2
-      exec bash "$0"
+      exec bash "$SCRIPT_PATH"
     else
       info "已取消更新"
       rm -f "$tmp_file"
@@ -1850,9 +1881,3 @@ main_menu(){
 need_root
 check_base_deps
 main_menu
-FULL_EOF
-
-chmod +x /root/net-tune-pro-v3-zh.sh
-echo "✅ 完整无省略修改版已成功写入 /root/net-tune-pro-v3-zh.sh"
-echo "现在直接运行：bash /root/net-tune-pro-v3-zh.sh"
-echo "进入菜单 → 3（应用网络优化方案） → 4（UDP 专项版）即可一键应用 s-ui Hysteria2 极致优化"
