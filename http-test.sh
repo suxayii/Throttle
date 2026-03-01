@@ -7,7 +7,6 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 # ====== 获取代理 ======
-# 支持命令行参数：./te.sh http://user:pass@ip:port
 PROXY=${1:-}
 if [ -z "$PROXY" ]; then
     echo -e "${YELLOW}请输入代理地址 (例如 http://user:pass@ip:port 或 socks5://user:pass@ip:port):${NC}"
@@ -23,11 +22,10 @@ fi
 TEST_URL="https://speed.cloudflare.com/__down?bytes=524288000"
 
 echo -e "\n${YELLOW}=============================="
-echo "     HTTP/SOCKS5 代理测速工具 v2.1"
+echo "     HTTP/SOCKS5 代理测速工具 v2.2（最终稳定版）"
 echo -e "     目标代理: $PROXY"
 echo -e "==============================${NC}\n"
 
-# 默认回车直接开始
 read -p "确认开始测试吗? [Y/n]: " confirm
 if [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]]; then
     echo -e "${YELLOW}已取消测试${NC}"
@@ -49,13 +47,16 @@ echo -e "$latency_info\n"
 
 echo -e "${GREEN}2️⃣ 测试下载速度（500MB，限时60秒）...${NC}"
 
-# 【核心修复】用 2>&1 + tail 可靠捕获速度，解决进度条干扰
-speed_output=$(curl -x "$PROXY" -o /dev/null --progress-bar \
-  --connect-timeout 10 -m 60 \
-  -w "%{speed_download}\n" "$TEST_URL" 2>&1)
+# 使用临时文件捕获速度（最稳定方式）
+speed_file=$(mktemp)
+trap 'rm -f "$speed_file"' EXIT   # 自动清理
+
+curl -x "$PROXY" -o /dev/null --progress-bar \
+     --connect-timeout 10 -m 60 \
+     -w "%{speed_download}" "$TEST_URL" > "$speed_file"
 
 curl_status=$?
-speed_bps=$(echo "$speed_output" | tail -n 1 | tr -d '\r\n ')
+speed_bps=$(tr -d '\r\n ' < "$speed_file")
 
 if [[ $curl_status -ne 0 && $curl_status -ne 28 ]]; then
     echo -e "\n${YELLOW}⚠️  下载过程异常 (curl退出码: $curl_status)${NC}"
