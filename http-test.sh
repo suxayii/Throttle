@@ -33,7 +33,7 @@ if [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]]; then
 fi
 
 echo -e "\n${GREEN}1️⃣ 测试连通性与延迟...${NC}"
-latency_info=$(curl -x "$PROXY" -o /dev/null -s --connect-timeout 10 -m 15 -w \
+latency_info=$(curl -x "$PROXY" -k -o /dev/null -s --connect-timeout 10 -m 15 -w \
 "DNS解析: %{time_namelookup}s\n连接建立: %{time_connect}s\n首字节延迟: %{time_starttransfer}s\n总时间: %{time_total}s" \
 https://speed.cloudflare.com)
 
@@ -51,7 +51,7 @@ echo -e "${GREEN}2️⃣ 测试下载速度（100MB，限时60秒）...${NC}"
 speed_file=$(mktemp)
 trap 'rm -f "$speed_file"' EXIT   # 自动清理
 
-curl -x "$PROXY" -o /dev/null --progress-bar \
+curl -x "$PROXY" -k -o /dev/null --progress-bar \
      --connect-timeout 10 -m 60 \
      -w "%{speed_download}" "$TEST_URL" > "$speed_file"
 
