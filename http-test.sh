@@ -18,8 +18,8 @@ if [ -z "$PROXY" ]; then
     exit 1
 fi
 
-# 500MB 测速文件
-TEST_URL="https://speed.cloudflare.com/__down?bytes=524288000"
+# 100MB 测速文件
+TEST_URL="https://speed.hetzner.de/100MB.bin"
 
 echo -e "\n${YELLOW}=============================="
 echo "     HTTP/SOCKS5 代理测速工具 v2.2（最终稳定版）"
@@ -45,7 +45,7 @@ fi
 echo -e "${GREEN}✅ 代理连接成功！${NC}"
 echo -e "$latency_info\n"
 
-echo -e "${GREEN}2️⃣ 测试下载速度（500MB，限时60秒）...${NC}"
+echo -e "${GREEN}2️⃣ 测试下载速度（100MB，限时60秒）...${NC}"
 
 # 使用临时文件捕获速度（最稳定方式）
 speed_file=$(mktemp)
