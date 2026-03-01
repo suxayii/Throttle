@@ -15,6 +15,7 @@
   - [3. BBR 网络优化脚本 (bbr.sh)](#3-bbr-网络优化脚本-bbrsh)
   - [4. GOST 代理部署脚本 (gost-proxy.sh)](#4-gost-代理部署脚本-gost-proxysh)
   - [5. nftables 端口转发管理与 NAT 优化 (nft-forward.sh)](#5-nftables-端口转发管理与-nat-优化-nft-forwardsh)
+  - [6. HTTP/SOCKS5 代理测速工具 (http-test.sh)](#6-httpsocks5-代理测速工具-http-testsh)
 - [🚀 快速开始](#-快速开始)
 - [📋 系统要求](#-系统要求)
 - [🤝 贡献与反馈](#-贡献与反馈)
@@ -86,6 +87,16 @@
     -   **精准控制**：支持来源 IP 白名单过滤、绑定特定网卡接口、协议分离控制（TCP/UDP/两者）。
     -   **极简操作**：全交互式菜单，自动配置内核转发及环境依赖。
 
+### 6. HTTP/SOCKS5 代理测速工具 (`http-test.sh`)
+专为代理节点（如 GOST 节点等）设计的命令行测速工具。
+
+-   **核心功能**：
+    -   **一键测速**：自动测试代理的连通性、各项协议延迟（DNS/TCP/TTFB）以及真实下载速度（500MB 云端样本）。
+    -   **参数直连**：支持通过命令行参数直接传入代理地址（HTTP/SOCKS5），便于自动化与快速复用。
+    -   **防卡死机制**：内置严格的超时管理（60秒上限），遇到失效或极慢节点自动跳出。
+    -   **实时进度**：终端展示下载进度条与实时速度预估，最终输出易懂的平均 MB/s。
+    -   **自动日志**：测试结果会自动保存到 `proxy_speed.log`，方便后续查看记录。
+
 ---
 
 ## 🚀 快速开始
@@ -125,6 +136,11 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 #### 5. nftables 端口转发 & NAT 优化 (推荐)
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nft-forward.sh)
+```
+
+#### 6. HTTP/SOCKS5 代理测速
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/http-test.sh)
 ```
 
 ---
