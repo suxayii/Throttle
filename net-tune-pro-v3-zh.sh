@@ -525,11 +525,14 @@ precheck(){
     info "虚拟化类型：物理机或未检测到"
   fi
 
-  # ===== CPU 性能检测 =====
-  local cpu_model cpu_cores
+  # ===== CPU / 内存 性能检测 =====
+  local cpu_model cpu_cores total_mem_mb
   cpu_model="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo unknown)"
   cpu_cores="$(nproc 2>/dev/null || echo 1)"
+  total_mem_mb="$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo unknown)"
+  
   info "CPU：$cpu_model（${cpu_cores}核）"
+  info "内存：${total_mem_mb} MB"
   
   # AES-NI 指令集检测（加密性能关键）
   if grep -qw aes /proc/cpuinfo 2>/dev/null; then
