@@ -641,7 +641,39 @@ precheck(){
 
   # ===== 网络配置总览 =====
   line
-  echo -e "${BOLD}=== 网卡信息 ===${NC}"
+  echo -e "${BOLD}=== 核心硬件与系统状态 ===${NC}"
+  # Swap 状态
+  local swap_total_kb swappiness
+  swap_total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  swappiness="$(sysctl -n vm.swappiness 2>/dev/null || echo unknown)"
+  if (( swap_total_kb == 0 )); then
+    echo "  Swap 状态: 未开启 (0 MB)"
+  else
+    echo "  Swap 状态: 已开启 ($((swap_total_kb / 1024)) MB) | Swappiness: $swappiness"
+  fi
+
+  # 硬件卸载状态 (Offload)
+  if [[ -n "${nic:-}" ]] && cmd_exists ethtool; then
+    local offload_status=""
+    for feat in gso gro tso; do
+      local long_feat=""
+      case "$feat" in
+        gso) long_feat="generic-segmentation-offload" ;;
+        gro) long_feat="generic-receive-offload" ;;
+        tso) long_feat="tcp-segmentation-offload" ;;
+      esac
+      local status
+      status="$(ethtool -k "$nic" 2>/dev/null | awk -v f="$long_feat" '$1 == f":" {print $2}')"
+      [[ "$status" == "on" ]] && offload_status="$offload_status ${feat^^}"
+    done
+    [[ -z "$offload_status" ]] && offload_status=" 未开启或不支持"
+    echo "  网卡硬件卸载 (Offload):$offload_status"
+  else
+    echo "  网卡硬件卸载 (Offload): 无法检测 (缺少 ethtool 或未找到网卡)"
+  fi
+  echo
+
+  echo -e "${BOLD}=== 网卡队列与 IP 信息 ===${NC}"
   ip link show 2>/dev/null | grep -E "^[0-9]+: " || true
   echo
 
