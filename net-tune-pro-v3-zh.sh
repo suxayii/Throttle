@@ -4,8 +4,7 @@ set -euo pipefail
 # ===================== 基础路径 =====================
 ACTIVE_FILE="/etc/sysctl.d/99-net-tune-pro-v3.conf"            # 网络方案托管文件
 PROFILE_STATE_FILE="/etc/net-tune-pro-profile-name"            # 当前应用方案名称记录
-BBR_SYSCTL_FILE="/etc/sysctl.d/99-joeyblog.conf"               # BBR/QDISC托管文件
-MODULES_CONF="/etc/modules-load.d/joeyblog-qdisc.conf"         # qdisc模块自动加载
+
 BACKUP_DIR="/root/sysctl-backups-v3"
 PERM_DIR="/root/sysctl-permanent-baseline-v3"
 LAST_APPLY_DIR="${BACKUP_DIR}/last_apply"
@@ -61,23 +60,7 @@ check_base_deps(){
   return 0
 }
 
-ensure_bbr_deps_debian(){
-  local required=("curl" "wget" "dpkg" "awk" "sed" "sysctl" "jq")
-  local need_install=()
-  for c in "${required[@]}"; do
-    cmd_exists "$c" || need_install+=("$c")
-  done
 
-  if [[ ${#need_install[@]} -gt 0 ]]; then
-    info "检测到缺少依赖：${need_install[*]}"
-    apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y "${need_install[@]}" >/dev/null 2>&1 || {
-      err "依赖安装失败：${need_install[*]}"
-      return 1
-    }
-    ok "依赖安装完成"
-  fi
-}
 
 ensure_mtr(){
   if cmd_exists mtr; then
@@ -171,7 +154,8 @@ profile_udp_quic(){
     echo "# ---- 方案：UDP 专项（s-ui 面板 Hysteria2 生产极致版）----"
 
     # 自动内存检测（s-ui Hysteria2 专用，低配绝不 OOM）
-    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
+    TOTAL_MEM=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    TOTAL_MEM=${TOTAL_MEM:-0}
     if [ "$TOTAL_MEM" -ge 16384 ]; then
         RMAX=134217728      # 128MB（16G+ 高端机）
         echo "# 检测到 ≥16G 内存 → 128MB缓冲"
@@ -497,23 +481,15 @@ precheck(){
   line
   check_base_deps || return 1
 
-  # ===== 内核与 BBR 状态 =====
-  local kernel_ver bbr_available current_cc current_qdisc bbr_version
+  # ===== 内核与拥塞控制状态 =====
+  local kernel_ver current_cc current_qdisc
   kernel_ver="$(uname -r || true)"
   info "内核版本：$kernel_ver"
   
-  # 检查 BBR 可用性
-  bbr_available="no"
   if [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]]; then
     local available_cc
     available_cc="$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || true)"
     info "可用拥塞控制：$available_cc"
-    if echo "$available_cc" | grep -qw bbr; then
-      bbr_available="yes"
-      ok "内核支持 BBR"
-    else
-      warn "内核未报告 BBR 支持"
-    fi
   fi
   
   # 当前拥塞控制状态
@@ -521,17 +497,6 @@ precheck(){
   current_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
   info "当前拥塞控制：$current_cc"
   info "当前队列算法：$current_qdisc"
-  
-  # BBR 模块版本检测
-  if [[ "$current_cc" == "bbr" ]]; then
-    ok "BBR 已启用"
-    bbr_version="$(modinfo tcp_bbr 2>/dev/null | awk '/^version:/ {print $2}' || true)"
-    if [[ -n "$bbr_version" ]]; then
-      info "BBR 模块版本：$bbr_version"
-    fi
-  else
-    warn "BBR 未启用（当前：$current_cc）"
-  fi
 
   # ===== 虚拟化类型检测 =====
   local virt_type
@@ -653,7 +618,7 @@ precheck(){
     udp_drop_rules="$(iptables -L -n 2>/dev/null | grep -i "udp.*drop\|drop.*udp" | head -3 || true)"
     if [[ -n "$udp_drop_rules" ]]; then
       warn "检测到 UDP 丢弃规则（可能影响 Hysteria2 等 UDP 代理）："
-      echo "$udp_drop_rules" | head -3
+      echo "$udp_drop_rules" | head -3 || true
     else
       ok "未检测到 UDP 阻止规则"
     fi
@@ -665,11 +630,56 @@ precheck(){
     tc_rules="$(tc qdisc show dev "$nic" 2>/dev/null || true)"
     if echo "$tc_rules" | grep -qiE "tbf|htb|cake|police"; then
       warn "检测到流量整形规则（可能存在端口限速）："
-      echo "$tc_rules" | grep -iE "tbf|htb|cake|police" | head -3
+      echo "$tc_rules" | grep -iE "tbf|htb|cake|police" | head -3 || true
     else
       ok "未检测到端口限速规则"
     fi
   fi
+
+  # ===== 网络配置总览 =====
+  line
+  echo -e "${BOLD}=== 网卡信息 ===${NC}"
+  ip link show 2>/dev/null | grep -E "^[0-9]+: " || true
+  echo
+
+  echo -e "${BOLD}=== TCP 拥塞控制 ===${NC}"
+  sysctl net.ipv4.tcp_congestion_control 2>/dev/null || echo "  无法读取"
+  echo
+
+  echo -e "${BOLD}=== 默认队列调度器 ===${NC}"
+  sysctl net.core.default_qdisc 2>/dev/null || echo "  无法读取"
+  echo
+
+  echo -e "${BOLD}=== TCP backlog 和最大连接数 ===${NC}"
+  sysctl net.core.netdev_max_backlog net.core.somaxconn 2>/dev/null || true
+  echo
+
+  echo -e "${BOLD}=== TCP 缓冲区设置 ===${NC}"
+  sysctl net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.core.rmem_max net.core.wmem_max 2>/dev/null || true
+  echo
+
+  echo -e "${BOLD}=== 网卡队列长度 (txqueuelen) ===${NC}"
+  local iface_dir
+  for iface_dir in /sys/class/net/*; do
+    local iface_name
+    iface_name="$(basename "$iface_dir")"
+    [[ "$iface_name" == "lo" ]] && continue
+    echo -n "  $iface_name: "
+    cat "$iface_dir/tx_queue_len" 2>/dev/null || echo "无法读取"
+  done
+  echo
+
+  echo -e "${BOLD}=== BBR 模块加载情况 ===${NC}"
+  if lsmod 2>/dev/null | grep -q bbr; then
+    ok "BBR 已加载"
+  else
+    warn "BBR 未加载"
+  fi
+  echo
+
+  echo -e "${BOLD}=== 适合代理建议 ===${NC}"
+  echo -e "  ${GREEN}推荐配置: BBR + fq + txqueuelen>=8192 + netdev_max_backlog>=16384${NC}"
+  echo "  查看上面各项是否满足判断即可"
 
   line
   [[ -w /etc/sysctl.d ]] || { err "/etc/sysctl.d 不可写"; return 1; }
@@ -735,7 +745,7 @@ resolve_conflicts(){
     IFS=',' read -ra file_array <<< "$file_list"
     for f in "${file_array[@]}"; do
       # 排除脚本管理的文件
-      if [[ "$f" == "$ACTIVE_FILE" || "$f" == "$BBR_SYSCTL_FILE" ]]; then
+      if [[ "$f" == "$ACTIVE_FILE" ]]; then
         continue
       fi
       
@@ -771,10 +781,7 @@ save_last_and_history_snapshot(){
 
   [[ -f "$ACTIVE_FILE" ]] && cp -a "$ACTIVE_FILE" "$LAST_APPLY_DIR/managed-active.conf" || true
   [[ -f "$ACTIVE_FILE" ]] && cp -a "$ACTIVE_FILE" "$hdir/managed-active.conf" || true
-  [[ -f "$BBR_SYSCTL_FILE" ]] && cp -a "$BBR_SYSCTL_FILE" "$LAST_APPLY_DIR/managed-bbr.conf" || true
-  [[ -f "$BBR_SYSCTL_FILE" ]] && cp -a "$BBR_SYSCTL_FILE" "$hdir/managed-bbr.conf" || true
-  [[ -f "$MODULES_CONF" ]] && cp -a "$MODULES_CONF" "$LAST_APPLY_DIR/managed-modules.conf" || true
-  [[ -f "$MODULES_CONF" ]] && cp -a "$MODULES_CONF" "$hdir/managed-modules.conf" || true
+
 
   sysctl -a 2>/dev/null > "$LAST_APPLY_DIR/runtime-sysctl-all.txt" || true
   sysctl -a 2>/dev/null > "$hdir/runtime-sysctl-all.txt" || true
@@ -809,12 +816,7 @@ rollback_last_apply_point(){
   else
     rm -f "$ACTIVE_FILE"
   fi
-  if [[ -f "$LAST_APPLY_DIR/managed-bbr.conf" ]]; then
-    cp -a "$LAST_APPLY_DIR/managed-bbr.conf" "$BBR_SYSCTL_FILE"
-  fi
-  if [[ -f "$LAST_APPLY_DIR/managed-modules.conf" ]]; then
-    cp -a "$LAST_APPLY_DIR/managed-modules.conf" "$MODULES_CONF"
-  fi
+
 
   if sysctl --system >/tmp/net-tune-v3-rollback.log 2>&1; then
     ok "已回滚到上一次应用点（仅管理文件）"
@@ -832,8 +834,7 @@ save_permanent_baseline(){
   [[ -f /etc/sysctl.conf ]] && cp -a /etc/sysctl.conf "$PERM_DIR/sysctl.conf" || true
   cp -a /etc/sysctl.d/*.conf "$PERM_DIR/sysctl.d/" 2>/dev/null || true
   [[ -f "$ACTIVE_FILE" ]] && cp -a "$ACTIVE_FILE" "$PERM_DIR/managed-active.conf" || true
-  [[ -f "$BBR_SYSCTL_FILE" ]] && cp -a "$BBR_SYSCTL_FILE" "$PERM_DIR/managed-bbr.conf" || true
-  [[ -f "$MODULES_CONF" ]] && cp -a "$MODULES_CONF" "$PERM_DIR/managed-modules.conf" || true
+
 
   # 注意：heredoc 未加引号，变量会在写入时展开（记录创建时信息）
   cat > "$marker" <<LOCK
@@ -868,12 +869,7 @@ restore_permanent_baseline(){
   else
     rm -f "$ACTIVE_FILE"
   fi
-  if [[ -f "$PERM_DIR/managed-bbr.conf" ]]; then
-    cp -a "$PERM_DIR/managed-bbr.conf" "$BBR_SYSCTL_FILE"
-  fi
-  if [[ -f "$PERM_DIR/managed-modules.conf" ]]; then
-    cp -a "$PERM_DIR/managed-modules.conf" "$MODULES_CONF"
-  fi
+
 
   if sysctl --system >/tmp/net-tune-v3-restore-baseline.log 2>&1; then
     ok "已回滚到永久初始配置（管理文件范围）"
@@ -937,12 +933,6 @@ EOF
       warn "未检测到 s-ui.service，请手动确认服务状态"
   fi
 
-  # [NEW] 自动修复 BBR 未开启的问题
-  if [[ ! -f "$BBR_SYSCTL_FILE" ]]; then
-      warn "检测到 BBR 配置文件 ($BBR_SYSCTL_FILE) 不存在"
-      info "正在自动启用 BBR + FQ (默认推荐)..."
-      bbr_qdisc_apply "bbr" "fq" || true
-  fi
 }
 
 mtr_probe_target(){
@@ -1050,221 +1040,6 @@ auto_optimize(){
   ok "智能优化完成：已应用 $(get_profile_name "$selected_profile")"
 }
 
-# ===================== BBR 功能（中文） =====================
-clean_bbr_sysctl_conf(){
-  touch "$BBR_SYSCTL_FILE"
-  sed -i '/^[[:space:]]*net\.core\.default_qdisc[[:space:]]*=/d' "$BBR_SYSCTL_FILE"
-  sed -i '/^[[:space:]]*net\.ipv4\.tcp_congestion_control[[:space:]]*=/d' "$BBR_SYSCTL_FILE"
-}
-
-load_qdisc_module(){
-  local qdisc_name="$1"
-  local module_name="sch_$qdisc_name"
-  local current_qdisc
-  current_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo fq_codel)"
-
-  if sysctl -w net.core.default_qdisc="$qdisc_name" >/dev/null 2>&1; then
-    sysctl -w net.core.default_qdisc="$current_qdisc" >/dev/null 2>&1 || true
-    return 0
-  fi
-
-  if lsmod | grep -q "^${module_name//-/_}"; then
-    return 0
-  fi
-
-  info "尝试加载模块：$module_name"
-  if modprobe "$module_name" 2>/dev/null; then
-    ok "模块加载成功：$module_name"
-    return 0
-  else
-    warn "模块加载失败，内核可能不支持：$module_name"
-    return 1
-  fi
-}
-
-bbr_qdisc_apply(){
-  local algo="$1" qdisc="$2"
-  save_last_and_history_snapshot >/dev/null || true
-
-  load_qdisc_module "$qdisc" || true
-  sysctl -w net.core.default_qdisc="$qdisc" >/dev/null 2>&1 || true
-  sysctl -w net.ipv4.tcp_congestion_control="$algo" >/dev/null 2>&1 || true
-
-  local new_qdisc new_algo
-  new_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
-  new_algo="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
-
-  if [[ "$new_qdisc" == "$qdisc" && "$new_algo" == "$algo" ]]; then
-    ok "已立即生效：队列=$new_qdisc，拥塞控制=$new_algo"
-  else
-    err "应用失败：期望 $qdisc/$algo，实际 $new_qdisc/$new_algo"
-    return 1
-  fi
-
-  read -rp "是否永久保存到 $BBR_SYSCTL_FILE ？[y/N]: " save
-  if [[ "${save:-N}" =~ ^[Yy]$ ]]; then
-    clean_bbr_sysctl_conf
-    echo "net.core.default_qdisc=$qdisc" >> "$BBR_SYSCTL_FILE"
-    echo "net.ipv4.tcp_congestion_control=$algo" >> "$BBR_SYSCTL_FILE"
-    sysctl --system >/tmp/net-tune-v3-bbr-save.log 2>&1 || true
-
-    if [[ "$qdisc" == "fq" || "$qdisc" == "fq_codel" ]]; then
-      rm -f "$MODULES_CONF"
-    else
-      echo "sch_$qdisc" > "$MODULES_CONF"
-    fi
-    ok "已永久保存"
-  else
-    warn "未永久保存，重启后可能恢复"
-  fi
-}
-
-get_installed_joey_kernel(){
-  dpkg -l 2>/dev/null | awk '/linux-image/ && /joeyblog/ {print $2}' | sed 's/linux-image-//' | head -n1
-}
-
-update_bootloader(){
-  info "正在更新引导加载器..."
-  if cmd_exists update-grub; then
-    if update-grub; then ok "update-grub 成功"; return 0; else err "update-grub 失败"; return 1; fi
-  else
-    warn "未找到 update-grub。系统可能使用其他引导（如 U-Boot），请按系统文档确认。"
-    return 0
-  fi
-}
-
-install_packages_from_tmp(){
-  ls /tmp/linux-*.deb >/dev/null 2>&1 || { err "未找到 /tmp/linux-*.deb"; return 1; }
-
-  local installed
-  installed="$(dpkg -l 2>/dev/null | awk '/joeyblog/ {print $2}' | tr '\n' ' ')"
-  if [[ -n "$installed" ]]; then
-    info "正在卸载旧版内核：$installed"
-    apt-get remove --purge -y $installed >/dev/null 2>&1 || true
-  fi
-
-  info "正在安装新内核..."
-  if dpkg -i /tmp/linux-*.deb && update_bootloader; then
-    ok "内核安装完成"
-    read -rp "是否立即重启以加载新内核？[y/N]: " rb
-    if [[ "${rb:-N}" =~ ^[Yy]$ ]]; then
-      reboot
-    else
-      warn "请稍后手动重启：sudo reboot"
-    fi
-  else
-    err "安装或引导更新失败，请检查系统状态"
-    return 1
-  fi
-}
-
-install_latest_joey_kernel(){
-  is_debian_like || { err "该功能仅支持 Debian/Ubuntu（apt-get）"; return 1; }
-  ensure_bbr_deps_debian || return 1
-  [[ "$ARCH" == "aarch64" || "$ARCH" == "x86_64" ]] || { err "仅支持 aarch64/x86_64，当前：$ARCH"; return 1; }
-
-  local api="https://api.github.com/repos/byJoey/Actions-bbr-v3/releases"
-  local data arch_filter latest_tag core_latest installed urls
-
-  info "正在从 GitHub 获取发布信息..."
-  data="$(curl -fsSL "$api" || true)"
-  [[ -n "$data" ]] || { err "获取发布信息失败"; return 1; }
-
-  arch_filter="x86_64"; [[ "$ARCH" == "aarch64" ]] && arch_filter="arm64"
-  latest_tag="$(echo "$data" | jq -r --arg f "$arch_filter" 'map(select(.tag_name|test($f;"i")))|sort_by(.published_at)|.[-1].tag_name')"
-  [[ -n "$latest_tag" && "$latest_tag" != "null" ]] || { err "未找到匹配当前架构的版本"; return 1; }
-
-  installed="$(get_installed_joey_kernel)"
-  core_latest="${latest_tag#x86_64-}"; core_latest="${core_latest#arm64-}"
-  info "最新版本：$latest_tag"
-  info "当前已安装：${installed:-未安装}"
-
-  if [[ -n "$installed" && "$installed" == "$core_latest"* ]]; then
-    ok "当前已是最新版本"
-    return 0
-  fi
-
-  urls="$(echo "$data" | jq -r --arg t "$latest_tag" '.[]|select(.tag_name==$t)|.assets[].browser_download_url')"
-  rm -f /tmp/linux-*.deb
-  while IFS= read -r u; do
-    [[ -z "$u" ]] && continue
-    info "正在下载：$u"
-    wget -q --show-progress "$u" -P /tmp/ || { err "下载失败：$u"; return 1; }
-  done <<< "$urls"
-
-  install_packages_from_tmp
-}
-
-install_specific_joey_kernel(){
-  is_debian_like || { err "该功能仅支持 Debian/Ubuntu"; return 1; }
-  ensure_bbr_deps_debian || return 1
-  [[ "$ARCH" == "aarch64" || "$ARCH" == "x86_64" ]] || { err "仅支持 aarch64/x86_64"; return 1; }
-
-  local api="https://api.github.com/repos/byJoey/Actions-bbr-v3/releases"
-  local data arch_filter selected idx urls
-  local -a tags
-
-  data="$(curl -fsSL "$api" || true)"
-  [[ -n "$data" ]] || { err "获取发布信息失败"; return 1; }
-
-  arch_filter="x86_64"; [[ "$ARCH" == "aarch64" ]] && arch_filter="arm64"
-  mapfile -t tags < <(echo "$data" | jq -r --arg f "$arch_filter" '.[]|select(.tag_name|test($f;"i"))|.tag_name')
-  [[ ${#tags[@]} -gt 0 ]] || { err "未找到可用版本"; return 1; }
-
-  echo "可选版本列表："
-  for i in "${!tags[@]}"; do
-    echo " $((i+1))) ${tags[$i]}"
-  done
-  read -rp "请输入要安装的版本编号： " idx
-  [[ "$idx" =~ ^[0-9]+$ ]] || { err "输入无效"; return 1; }
-  (( idx>=1 && idx<=${#tags[@]} )) || { err "编号超出范围"; return 1; }
-
-  selected="${tags[$((idx-1))]}"
-  info "已选择版本：$selected"
-
-  urls="$(echo "$data" | jq -r --arg t "$selected" '.[]|select(.tag_name==$t)|.assets[].browser_download_url')"
-  rm -f /tmp/linux-*.deb
-  while IFS= read -r u; do
-    [[ -z "$u" ]] && continue
-    info "正在下载：$u"
-    wget -q --show-progress "$u" -P /tmp/ || { err "下载失败：$u"; return 1; }
-  done <<< "$urls"
-
-  install_packages_from_tmp
-}
-
-check_bbr_v3_status(){
-  local info_mod version algo qdisc
-  info_mod="$(modinfo tcp_bbr 2>/dev/null || true)"
-  if [[ -z "$info_mod" ]]; then
-    warn "未检测到 tcp_bbr 模块信息（可能未加载或内核不包含）"
-  else
-    version="$(awk '/^version:/ {print $2}' <<< "$info_mod" | head -n1)"
-    [[ -n "$version" ]] && info "tcp_bbr 模块 version：$version" || info "检测到 tcp_bbr 模块（未读到 version 字段）"
-  fi
-
-  algo="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
-  qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
-  echo "当前拥塞控制：$algo"
-  echo "当前队列算法：$qdisc"
-
-  if [[ "$algo" == "bbr" ]]; then ok "BBR 已启用"; else warn "当前未启用 bbr"; fi
-}
-
-uninstall_joey_kernel(){
-  is_debian_like || { err "该功能仅支持 Debian/Ubuntu"; return 1; }
-  local pkgs
-  pkgs="$(dpkg -l 2>/dev/null | awk '/joeyblog/ {print $2}' | tr '\n' ' ')"
-  if [[ -z "$pkgs" ]]; then
-    warn "未找到 joeyblog 内核包"
-    return 0
-  fi
-
-  info "将卸载以下内核包：$pkgs"
-  apt-get remove --purge -y $pkgs || { err "卸载失败"; return 1; }
-  update_bootloader || true
-  ok "卸载完成，请重启系统"
-}
 
 # ===================== 状态/监控 =====================
 show_status(){
@@ -1272,12 +1047,9 @@ show_status(){
   echo -e "${BOLD}【当前状态】${NC}"
   line
   echo "网络方案托管文件：$ACTIVE_FILE"
-  echo "BBR托管文件     ：$BBR_SYSCTL_FILE"
-  echo "模块配置文件    ：$MODULES_CONF"
   echo "当前会话方案    ：${CURRENT_PROFILE:-unknown}"
   line
   [[ -f "$ACTIVE_FILE" ]] && { echo "[网络方案文件内容]"; cat "$ACTIVE_FILE"; line; }
-  [[ -f "$BBR_SYSCTL_FILE" ]] && { echo "[BBR文件内容]"; cat "$BBR_SYSCTL_FILE"; line; }
 
   sysctl \
     net.core.default_qdisc \
@@ -1298,7 +1070,7 @@ watch_metrics(){
     clear
     echo -e "${BOLD}===== $(date '+%F %T') =====${NC}"
     echo "[softnet_stat 丢包列（第2列）前8行]"
-    awk '{print NR ": " $2}' /proc/net/softnet_stat | head -n 8
+    awk '{print NR ": " $2}' /proc/net/softnet_stat 2>/dev/null | head -n 8 || true
     echo
     echo "[ss -s]"
     ss -s || true
@@ -1367,8 +1139,8 @@ apply_system_optimizations(){
   echo -e "${BOLD}[1/5] Virtio 多队列${NC}"
   if cmd_exists ethtool; then
     local max_combined current_combined
-    max_combined="$(ethtool -l "$nic" 2>/dev/null | awk '/Combined:/{v=$2} END{print v}')"
-    current_combined="$(ethtool -l "$nic" 2>/dev/null | awk '/Combined:/{print $2; exit}')"
+    max_combined="$(ethtool -l "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/Combined:/){print $2; exit}}')"
+    current_combined="$(ethtool -l "$nic" 2>/dev/null | awk '/^Current/{flag=1} flag && /Combined:/{print $2; exit}')"
     if [[ -n "$max_combined" && "$max_combined" -gt 1 ]] 2>/dev/null; then
       local target=$((cpu_count < max_combined ? cpu_count : max_combined))
       if ethtool -L "$nic" combined "$target" 2>/dev/null; then
@@ -1415,8 +1187,8 @@ apply_system_optimizations(){
   echo -e "${BOLD}[3/5] Ring Buffer${NC}"
   local max_rx="256" max_tx="256"
   if cmd_exists ethtool; then
-    max_rx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/RX:/){print $2}}' | head -1)"
-    max_tx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/TX:/){print $2}}' | head -1)"
+    max_rx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/RX:/){print $2}}' | head -1 || true)"
+    max_tx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/TX:/){print $2}}' | head -1 || true)"
     if [[ -n "$max_rx" && -n "$max_tx" ]]; then
       if ethtool -G "$nic" rx "$max_rx" tx "$max_tx" 2>/dev/null; then
         ok "Ring Buffer 已设为最大值（RX=$max_rx TX=$max_tx）"
@@ -1479,6 +1251,49 @@ apply_system_optimizations(){
     setup_persistence "$nic" "$cpu_count" "$rps_mask" "$max_rx" "$max_tx"
   else
     warn "当前为临时生效模式，重启后将失效"
+  fi
+}
+
+set_txqueuelen(){
+  echo
+  echo -e "${BOLD}【设置网卡发送队列长度 (txqueuelen)】${NC}"
+  line
+
+  local nic current_len
+  nic="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+  [[ -z "$nic" ]] && nic="eth0"
+  
+  current_len="$(ip link show "$nic" 2>/dev/null | grep -oP 'txqueuelen \K\d+' || true)"
+  info "当前网卡：$nic"
+  info "当前队列长度：${current_len:-未知}"
+
+  local new_len
+  read -rp "请输入新的 txqueuelen 数值 (建议 5000-20000): " new_len
+  if [[ ! "$new_len" =~ ^[0-9]+$ ]]; then
+    err "输入无效，必须为数字"
+    return 1
+  fi
+
+  if ip link set "$nic" txqueuelen "$new_len"; then
+    ok "已成功设置 $nic 的 txqueuelen 为 $new_len"
+  else
+    err "修改失败，请检查权限或网卡名称"
+    return 1
+  fi
+
+  read -rp "是否将此设置添加到开机自启 (rc.local)？[y/N]: " yn
+  if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
+    local rc_file="/etc/rc.local"
+    # 确保 rc.local 存在
+    if [[ ! -f "$rc_file" ]]; then
+      printf '#!/bin/bash\nexit 0\n' > "$rc_file"
+      chmod +x "$rc_file"
+    fi
+    # 移除旧的 txqueuelen 设置（如果有）
+    sed -i "/ip link set .* txqueuelen/d" "$rc_file"
+    # 在 exit 0 之前插入
+    sed -i "/exit 0/i ip link set $nic txqueuelen $new_len" "$rc_file"
+    ok "已添加到 /etc/rc.local"
   fi
 }
 
@@ -1682,6 +1497,7 @@ system_optimize_menu(){
   echo "2) 应用优化并设置开机自启 (rc.local)"
   echo "3) 还原默认配置"
   echo "4) 强制清除所有限速规则 (tc qdisc clean)"
+  echo "5) 设置网卡发送队列长度 (txqueuelen)"
   echo "0) 返回主菜单"
   line
   read -rp "请输入选项: " choice
@@ -1690,6 +1506,7 @@ system_optimize_menu(){
     2) apply_system_optimizations "persist"; pause ;;
     3) restore_system_optimizations; pause ;;
     4) clear_tc_rules; pause ;;
+    5) set_txqueuelen; pause ;;
     0) return ;;
     *) warn "无效选择" ;;
   esac
@@ -1706,13 +1523,13 @@ clear_tc_rules(){
   [[ -z "$nic" ]] && nic="eth0"
   
   info "正在清除网卡 $nic 上的排队规则 (qdisc)..."
-  tc qdisc del dev "$nic" root 2>/dev/null
+  tc qdisc del dev "$nic" root 2>/dev/null || true
   
   info "正在清除 iptables 可能的流量标记 (mangle 表)..."
-  iptables -t mangle -F OUTPUT 2>/dev/null
+  iptables -t mangle -F OUTPUT 2>/dev/null || true
   
-  # 重新应用 fq (BBR 推荐)
-  info "重新应用 BBR 推荐队列 (fq)..."
+  # 重新应用默认队列 fq
+  info "重新应用默认队列 (fq)..."
   sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
   tc qdisc add dev "$nic" root fq 2>/dev/null || true
   
@@ -1852,7 +1669,7 @@ update_script(){
   else
     # 尝试提取新版本号（如果脚本里有定义 VERSION）
     local new_ver
-    new_ver="$(grep '^VERSION=' "$tmp_file" | head -1 | cut -d'"' -f2)"
+    new_ver="$(grep '^VERSION=' "$tmp_file" | head -1 | cut -d'"' -f2 || true)"
     [[ -z "$new_ver" ]] && new_ver="未知"
     
     info "发现新版本：$new_ver"
@@ -1922,37 +1739,45 @@ choose_profile_menu(){
     return
   done
 }
+enable_bbr_fq(){
+  echo
+  echo -e "${BOLD}【一键开启 BBR + fq】${NC}"
+  line
+  
+  if ! cmd_exists modprobe; then
+    warn "未找到 modprobe，将尝试直接通过 sysctl 开启..."
+  else
+    if ! lsmod 2>/dev/null | grep -q bbr; then
+      info "尝试加载 tcp_bbr 模块..."
+      modprobe tcp_bbr 2>/dev/null || true
+    fi
+  fi
 
-bbr_menu(){
-  while true; do
-    clear
-    echo -e "${BOLD}【BBR 内核与队列管理】${NC}"
-    line
-    echo "1) 安装/更新 BBR v3（最新版）"
-    echo "2) 安装指定版本 BBR 内核"
-    echo "3) 检查 BBR v3 状态"
-    echo "4) 启用 BBR + FQ"
-    echo "5) 启用 BBR + FQ_CODEL"
-    echo "6) 启用 BBR + FQ_PIE"
-    echo "7) 启用 BBR + CAKE"
-    echo "8) 卸载 joeyblog 内核"
-    echo "0) 返回"
-    line
-    read -rp "请输入选项 [0-8]: " a
-    case "$a" in
-      1) install_latest_joey_kernel ;;
-      2) install_specific_joey_kernel ;;
-      3) check_bbr_v3_status ;;
-      4) bbr_qdisc_apply "bbr" "fq" ;;
-      5) bbr_qdisc_apply "bbr" "fq_codel" ;;
-      6) bbr_qdisc_apply "bbr" "fq_pie" ;;
-      7) bbr_qdisc_apply "bbr" "cake" ;;
-      8) uninstall_joey_kernel ;;
-      0) return ;;
-      *) warn "无效输入" ;;
-    esac
-    pause
-  done
+  local bbr_conf="/etc/sysctl.conf"
+  info "正在配置系统主配置文件：$bbr_conf"
+
+  # 清理可能存在的旧配置
+  if [[ -f "$bbr_conf" ]]; then
+    sed -i '/^net\.core\.default_qdisc/d' "$bbr_conf"
+    sed -i '/^net\.ipv4\.tcp_congestion_control/d' "$bbr_conf"
+  fi
+
+  echo "net.core.default_qdisc = fq" >> "$bbr_conf"
+  echo "net.ipv4.tcp_congestion_control = bbr" >> "$bbr_conf"
+
+  sysctl -p "$bbr_conf" >/dev/null 2>&1 || true
+
+  local current_cc current_qdisc
+  current_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+  current_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
+
+  if [[ "$current_cc" == "bbr" && "$current_qdisc" == "fq" ]]; then
+      ok "BBR + fq 已成功开启！"
+      info "配置已持久化保存至自带系统配置：$bbr_conf"
+  else
+      warn "开启失败或仅部分生效。当前拥塞控制：$current_cc，队列：$current_qdisc"
+      warn "可能是内核版本过低（需要 4.9+）或存在不支持的虚拟化环境（如 OpenVZ）"
+  fi
 }
 
 main_menu(){
@@ -1960,25 +1785,25 @@ main_menu(){
     clear
     echo -e "${BOLD}${BLUE}"
     echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║   Net Tune Pro v3 中文版（网络优化 + BBR 全功能）      ║"
+    echo "║   Net Tune Pro v3 中文版（网络优化全功能）             ║"
     echo "╚══════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo "1) 预检查阶段"
     echo "2) 冲突检测（sysctl 重复键）"
     echo "3) 应用网络优化方案（原子写入）"
-    echo "4) BBR 内核/队列管理（安装/升级/卸载/启用）"
-    echo "5) 查看当前状态"
-    echo "6) 实时监控"
-    echo "7) 回滚到上一次应用点"
-    echo "8) 创建永久初始备份（仅首次）"
-    echo "9) 回滚到永久初始配置（管理文件范围）"
-    echo "10) 查看历史快照列表"
-    echo "11) 清理旧快照（保留最近20个）"
-    echo "12) 网卡/系统级深度优化 (Virtio/GRO)"
-    echo "13) Swap 优化（关闭/降低 swappiness）"
-    echo "14) 更新脚本"
-    echo "15) 查看当前优化规则"
-    echo "16) 智能检测与自动优化（硬件 + mtr 线路）"
+    echo "4) 查看当前状态"
+    echo "5) 实时监控"
+    echo "6) 回滚到上一次应用点"
+    echo "7) 创建永久初始备份（仅首次）"
+    echo "8) 回滚到永久初始配置（管理文件范围）"
+    echo "9) 查看历史快照列表"
+    echo "10) 清理旧快照（保留最近20个）"
+    echo "11) 网卡/系统级深度优化 (Virtio/GRO)"
+    echo "12) Swap 优化（关闭/降低 swappiness）"
+    echo "13) 更新脚本"
+    echo "14) 查看当前优化规则"
+    echo "15) 智能检测与自动优化（硬件 + mtr 线路）"
+    echo "16) 一键开启 BBR + fq (单项优化)"
     echo "0) 退出"
     line
     read -rp "请输入选项: " ch
@@ -1986,12 +1811,11 @@ main_menu(){
       1) precheck; pause ;;
       2) conflict_check; pause ;;
       3) choose_profile_menu ;;
-      4) bbr_menu ;;
-      5) show_status; pause ;;
-      6) watch_metrics ;;
-      7) rollback_last_apply_point; pause ;;
-      8) save_permanent_baseline; pause ;;
-      9)
+      4) show_status; pause ;;
+      5) watch_metrics ;;
+      6) rollback_last_apply_point; pause ;;
+      7) save_permanent_baseline; pause ;;
+      8)
         read -rp "确认回滚到永久初始配置？[y/N]: " yn
         if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
           restore_permanent_baseline
@@ -2000,13 +1824,14 @@ main_menu(){
         fi
         pause
         ;;
-      10) ls -1 "$HISTORY_DIR" 2>/dev/null | sort || true; pause ;;
-      11) clean_old_snapshots 20; pause ;;
-      12) system_optimize_menu ;;
-      13) optimize_swap; pause ;;
-      14) update_script; pause ;;
-      15) view_current_rules ;;
-      16) auto_optimize; pause ;;
+      9) ls -1 "$HISTORY_DIR" 2>/dev/null | sort || true; pause ;;
+      10) clean_old_snapshots 20; pause ;;
+      11) system_optimize_menu ;;
+      12) optimize_swap; pause ;;
+      13) update_script; pause ;;
+      14) view_current_rules ;;
+      15) auto_optimize; pause ;;
+      16) enable_bbr_fq; pause ;;
       0) ok "已退出"; exit 0 ;;
       *) warn "无效输入"; sleep 1 ;;
     esac
