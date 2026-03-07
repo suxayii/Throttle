@@ -156,80 +156,82 @@ profile_udp_quic(){
     # 自动内存检测（s-ui Hysteria2 专用，低配绝不 OOM）
     TOTAL_MEM=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
     TOTAL_MEM=${TOTAL_MEM:-0}
+
     if [ "$TOTAL_MEM" -ge 16384 ]; then
         RMAX=134217728      # 128MB（16G+ 高端机）
         echo "# 检测到 ≥16G 内存 → 128MB缓冲"
     elif [ "$TOTAL_MEM" -ge 8192 ]; then
-        RMAX=67108864       # 64MB（8G+ 推荐）
+        RMAX=67108864       # 64MB（8G+）
         echo "# 检测到 ≥8G 内存 → 64MB缓冲"
     elif [ "$TOTAL_MEM" -ge 4096 ]; then
-        RMAX=33554432       # 32MB（4G+ 安全）
+        RMAX=33554432       # 32MB（4G+）
         echo "# 检测到 ≥4G 内存 → 32MB缓冲"
     else
-        RMAX=16777216       # 16MB（低配极简）
-        echo "# 检测到低内存 → 16MB缓冲"
+        RMAX=16777216       # 16MB（1G低配专用，我们聊天推荐值）
+        echo "# 检测到低内存（≤2G）→ 16MB缓冲（1核1G最优）"
     fi
 
-    # UDP 内存三元组按实际物理内存动态计算（单位：页=4KB）
-    local TOTAL_PAGES=$(( TOTAL_MEM * 256 ))  # MB → 页(4KB)
-    local UDP_MIN=$(( TOTAL_PAGES / 4 ))
-    local UDP_PRESSURE=$(( TOTAL_PAGES / 3 ))
-    local UDP_MAX=$(( TOTAL_PAGES / 2 ))
-    # 设置合理下限，避免极低配机器值过小
-    [ "$UDP_MIN" -lt 65536 ] && UDP_MIN=65536
-    [ "$UDP_PRESSURE" -lt 131072 ] && UDP_PRESSURE=131072
-    [ "$UDP_MAX" -lt 262144 ] && UDP_MAX=262144
+    # ==================== 关键低配保护（新增） ====================
+    # 1G内存强制安全上限（防止 udp_mem 吃光整机）
+    if [ "$TOTAL_MEM" -lt 2048 ]; then
+        UDP_MIN=16384
+        UDP_PRESSURE=32768
+        UDP_MAX=65536
+        echo "# 1核1G强制低配UDP内存（总上限256MB页，避免OOM）"
+    else
+        # 原逻辑保持不变（高配用动态计算）
+        local TOTAL_PAGES=$(( TOTAL_MEM * 256 ))
+        local UDP_MIN=$(( TOTAL_PAGES / 4 ))
+        local UDP_PRESSURE=$(( TOTAL_PAGES / 3 ))
+        local UDP_MAX=$(( TOTAL_PAGES / 2 ))
+        [ "$UDP_MIN" -lt 65536 ] && UDP_MIN=65536
+        [ "$UDP_PRESSURE" -lt 131072 ] && UDP_PRESSURE=131072
+        [ "$UDP_MAX" -lt 262144 ] && UDP_MAX=262144
+    fi
 
 cat <<CONF
-# UDP专项 - s-ui Hysteria2 生产极致配置（全线路通用优化）
-net.core.rmem_default = 262144
-net.core.rmem_max = $((RMAX * 2))
-net.core.wmem_default = 262144
-net.core.wmem_max = $((RMAX * 2))
+# UDP专项 - s-ui Hysteria2 生产极致配置（已针对1核1G优化）
 
-# TCP 必然共存：s-ui 面板/DNS/伪装站
+net.core.rmem_default = 262144
+net.core.rmem_max = $RMAX
+net.core.wmem_default = 262144
+net.core.wmem_max = $RMAX
+
+# TCP（s-ui 面板/DNS/伪装站）
 net.ipv4.tcp_rmem = 4096 87380 $RMAX
 net.ipv4.tcp_wmem = 4096 65536 $RMAX
 
-# UDP专属关键参数（QUIC 带宽利用率核心，按实际内存动态计算）
+# UDP专属（1核1G已强制降到安全值）
 net.ipv4.udp_mem = $UDP_MIN $UDP_PRESSURE $UDP_MAX
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
 
-# s-ui 高并发优化（QUIC高PPS特性）
-net.core.netdev_max_backlog = 65536
-net.core.somaxconn = 8192
-net.ipv4.tcp_max_syn_backlog = 8192
-net.core.optmem_max = 262144
+# 1核1G专用低背压（我们聊天最推荐）
+net.core.netdev_max_backlog = 8192
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 4096
+net.core.optmem_max = 65536
 
-# 端口复用 + 快速回收（Hysteria2 短连接密集）
+# 其他通用优化（保留）
 net.ipv4.ip_local_port_range = 1024 65535
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_notsent_lowat = 16384
 
-# ---- 非GIA线路 UDP 增强（普通CN2/联通/移动直连等高丢包线路）----
-# ECN 显式拥塞通知：避免丢包式拥塞感知，QUIC/TCP 均受益
+# 高丢包线路增强（保留）
 net.ipv4.tcp_ecn = 1
-# SACK 选择性确认 + 时间戳：高丢包环境下精准重传
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_window_scaling = 1
-# 快速重传：TLP（尾丢探测）+ 早期重传，减少 RTO 等待
 net.ipv4.tcp_early_retrans = 3
-# 乱序容忍：非GIA线路包乱序概率高，避免误判为丢包
 net.ipv4.tcp_reordering = 6
-# RACK 丢包检测：替代传统 dupack，对乱序+丢包场景更精准
 net.ipv4.tcp_recovery = 1
 
-# ---- 晚高峰自适应增强 ----
-# 加大软中断预算：高峰期包量暴增时内核有足够处理时间
-net.core.netdev_budget = 1200
-net.core.netdev_budget_usecs = 25000
-# 连接快速回收：高峰期 TIME_WAIT 堆积会耗尽端口
-net.ipv4.tcp_max_tw_buckets = 65536
-# 孤儿连接上限：防止半关闭连接占满内存
-net.ipv4.tcp_max_orphans = 32768
+# 晚高峰增强
+net.core.netdev_budget = 800
+net.core.netdev_budget_usecs = 15000
+net.ipv4.tcp_max_tw_buckets = 32768
+net.ipv4.tcp_max_orphans = 16384
 CONF
 }
 profile_low_1c1g(){ cat <<'CONF'
