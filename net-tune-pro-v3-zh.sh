@@ -159,25 +159,42 @@ profile_udp_quic(){
 
     if [ "$TOTAL_MEM" -ge 16384 ]; then
         RMAX=134217728      # 128MB（16G+ 高端机）
-        echo "# 检测到 ≥16G 内存 → 128MB缓冲"
+        BACKLOG=65536
+        SOMAX=8192
+        echo "# 检测到 ≥16G 内存 → 128MB缓冲 (netdev_max_backlog: 65536)"
     elif [ "$TOTAL_MEM" -ge 8192 ]; then
         RMAX=67108864       # 64MB（8G+）
-        echo "# 检测到 ≥8G 内存 → 64MB缓冲"
+        BACKLOG=65536
+        SOMAX=8192
+        echo "# 检测到 ≥8G 内存 → 64MB缓冲 (netdev_max_backlog: 65536)"
     elif [ "$TOTAL_MEM" -ge 4096 ]; then
-        RMAX=33554432       # 32MB（4G+）
-        echo "# 检测到 ≥4G 内存 → 32MB缓冲"
+        RMAX=33554432       # 32MB（4G+ 稳妥防OOM保持吞吐）
+        BACKLOG=65536
+        SOMAX=8192
+        echo "# 检测到 ≥4G 内存 → 32MB稳妥缓冲 (netdev_max_backlog: 65536 多核激进)"
+    elif [ "$TOTAL_MEM" -ge 2048 ]; then
+        RMAX=33554432       # 32MB（2G+）
+        BACKLOG=65536
+        SOMAX=8192
+        echo "# 检测到 ≥2G 内存 → 32MB稳妥缓冲 (netdev_max_backlog: 65536 多核激进)"
     else
-        RMAX=16777216       # 16MB（1G低配专用，我们聊天推荐值）
-        echo "# 检测到低内存（≤2G）→ 16MB缓冲（1核1G最优）"
+        RMAX=16777216       # 16MB（1G低配专用，参考防 OOM 最大性能值）
+        BACKLOG=16384       # 根据用户最新的极致 1C1G 提议
+        SOMAX=8192
+        echo "# 检测到低内存（≤2G）→ 16MB缓冲 (netdev_max_backlog: 16384)"
     fi
 
     # ==================== 关键低配保护（新增） ====================
     # 1G内存强制安全上限（防止 udp_mem 吃光整机）
     if [ "$TOTAL_MEM" -lt 2048 ]; then
-        UDP_MIN=16384
-        UDP_PRESSURE=32768
-        UDP_MAX=65536
-        echo "# 1核1G强制低配UDP内存（总上限256MB页，避免OOM）"
+        UDP_MIN=65536
+        UDP_PRESSURE=131072
+        UDP_MAX=262144
+        U_RMEM_MIN=16384
+        U_WMEM_MIN=16384
+        BUDGET=1200
+        BUDGET_USECS=25000
+        echo "# 1核1G强制低配UDP内存（按需分配极大提高并发）"
     else
         # 原逻辑保持不变（高配用动态计算）
         local TOTAL_PAGES=$(( TOTAL_MEM * 256 ))
@@ -187,51 +204,67 @@ profile_udp_quic(){
         [ "$UDP_MIN" -lt 65536 ] && UDP_MIN=65536
         [ "$UDP_PRESSURE" -lt 131072 ] && UDP_PRESSURE=131072
         [ "$UDP_MAX" -lt 262144 ] && UDP_MAX=262144
+        U_RMEM_MIN=16384
+        U_WMEM_MIN=16384
+        BUDGET=1200
+        BUDGET_USECS=25000
     fi
 
 cat <<CONF
-# UDP专项 - s-ui Hysteria2 生产极致配置（已针对1核1G优化）
+# UDP专项 - s-ui Hysteria2 生产极致配置（全线路通用优化）
+
+# 队列调度与拥塞控制 (HY2 QUIC 内部 congestion control 仍依赖 Linux pacing)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
 
 net.core.rmem_default = 262144
 net.core.rmem_max = $RMAX
 net.core.wmem_default = 262144
 net.core.wmem_max = $RMAX
 
-# TCP（s-ui 面板/DNS/伪装站）
+# TCP 必然共存：s-ui 面板/DNS/伪装站
 net.ipv4.tcp_rmem = 4096 87380 $RMAX
 net.ipv4.tcp_wmem = 4096 65536 $RMAX
 
-# UDP专属（1核1G已强制降到安全值）
+# UDP专属关键参数（QUIC 带宽利用率核心，按实际内存动态计算）
 net.ipv4.udp_mem = $UDP_MIN $UDP_PRESSURE $UDP_MAX
-net.ipv4.udp_rmem_min = 8192
-net.ipv4.udp_wmem_min = 8192
+net.ipv4.udp_rmem_min = $U_RMEM_MIN
+net.ipv4.udp_wmem_min = $U_WMEM_MIN
 
-# 1核1G专用低背压（我们聊天最推荐）
-net.core.netdev_max_backlog = 8192
-net.core.somaxconn = 4096
-net.ipv4.tcp_max_syn_backlog = 4096
-net.core.optmem_max = 65536
+# s-ui 高并发优化（QUIC高PPS特性）
+net.core.netdev_max_backlog = $BACKLOG
+net.core.somaxconn = $SOMAX
+net.ipv4.tcp_max_syn_backlog = $SOMAX
+net.core.optmem_max = 262144
 
-# 其他通用优化（保留）
+# 端口复用 + 快速回收（Hysteria2 短连接密集）
 net.ipv4.ip_local_port_range = 1024 65535
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_notsent_lowat = 16384
 
-# 高丢包线路增强（保留）
+# ---- 非GIA线路 UDP 增强（普通CN2/联通/移动直连等高丢包线路）----
+# ECN 显式拥塞通知：避免丢包式拥塞感知，QUIC/TCP 均受益
 net.ipv4.tcp_ecn = 1
+# SACK 选择性确认 + 时间戳：高丢包环境下精准重传
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_window_scaling = 1
+# 快速重传：TLP（尾丢探测）+ 早期重传，减少 RTO 等待
 net.ipv4.tcp_early_retrans = 3
+# 乱序容忍：非GIA线路包乱序概率高，避免误判为丢包
 net.ipv4.tcp_reordering = 6
+# RACK 丢包检测：替代传统 dupack，对乱序+丢包场景更精准
 net.ipv4.tcp_recovery = 1
 
-# 晚高峰增强
-net.core.netdev_budget = 800
-net.core.netdev_budget_usecs = 15000
-net.ipv4.tcp_max_tw_buckets = 32768
-net.ipv4.tcp_max_orphans = 16384
+# ---- 晚高峰自适应增强 ----
+# 加大软中断预算：高峰期包量暴增时内核有足够处理时间
+net.core.netdev_budget = $BUDGET
+net.core.netdev_budget_usecs = $BUDGET_USECS
+# 连接快速回收：高峰期 TIME_WAIT 堆积会耗尽端口
+net.ipv4.tcp_max_tw_buckets = 65536
+# 孤儿连接上限：防止半关闭连接占满内存
+net.ipv4.tcp_max_orphans = 32768
 CONF
 }
 profile_low_1c1g(){ cat <<'CONF'
@@ -1526,6 +1559,35 @@ optimize_swap(){
   fi
 }
 
+set_sui_priority(){
+  echo
+  echo -e "${BOLD}【一键设置 s-ui 服务最高优先级 (Nice=-10)】${NC}"
+  line
+  
+  if ! systemctl cat s-ui.service >/dev/null 2>&1; then
+    err "未检测到 s-ui.service 服务，请确认 s-ui 已正确安装！"
+    return 1
+  fi
+
+  info "正在配置 s-ui.service 服务覆盖 (Override)..."
+  mkdir -p /etc/systemd/system/s-ui.service.d
+  cat > /etc/systemd/system/s-ui.service.d/override.conf <<EOF
+[Service]
+Nice=-10
+LimitNOFILE=524288
+EOF
+
+  info "正在重载 systemd 守护进程并重启 s-ui 服务..."
+  systemctl daemon-reload
+  systemctl restart s-ui.service
+
+  if systemctl is-active --quiet s-ui.service; then
+    ok "s-ui 服务优先级及文件描述符上限设置成功，并已重启生效！"
+  else
+    err "s-ui 服务重启失败，请检查服务状态：systemctl status s-ui.service"
+  fi
+}
+
 system_optimize_menu(){
   while true; do
   clear
@@ -1535,6 +1597,7 @@ system_optimize_menu(){
   echo "3) 还原默认配置"
   echo "4) 强制清除所有限速规则 (tc qdisc clean)"
   echo "5) 设置网卡发送队列长度 (txqueuelen)"
+  echo "6) 设置 s-ui 服务最高优先级 (Nice=-10)"
   echo "0) 返回主菜单"
   line
   read -rp "请输入选项: " choice
@@ -1544,6 +1607,7 @@ system_optimize_menu(){
     3) restore_system_optimizations; pause ;;
     4) clear_tc_rules; pause ;;
     5) set_txqueuelen; pause ;;
+    6) set_sui_priority; pause ;;
     0) return ;;
     *) warn "无效选择" ;;
   esac
