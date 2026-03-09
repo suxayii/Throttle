@@ -10,12 +10,13 @@
 ## 📖 目录
 
 - [🛠️ 核心工具](#️-核心工具)
-  - [1. Net Tune Pro v3 (install.sh)](#1-net-tune-pro-v3-installsh)
+  - [1. Net Tune Pro v3 (install.sh / net-tune-pro-v3-zh.sh)](#1-net-tune-pro-v3-installsh--net-tune-pro-v3-zhsh)
   - [2. 端口限速工具 (Throttle.sh)](#2-端口限速工具-throttlesh)
   - [3. BBR 网络优化脚本 (bbr.sh)](#3-bbr-网络优化脚本-bbrsh)
   - [4. GOST 代理部署脚本 (gost-proxy.sh)](#4-gost-代理部署脚本-gost-proxysh)
   - [5. nftables 端口转发管理与 NAT 优化 (nft-forward.sh)](#5-nftables-端口转发管理与-nat-优化-nft-forwardsh)
   - [6. HTTP/SOCKS5 代理测速工具 (http-test.sh)](#6-httpsocks5-代理测速工具-http-testsh)
+  - [7. 晚高峰网络诊断 (peak_test.sh)](#7-晚高峰网络诊断-peak_testsh)
 - [🚀 快速开始](#-快速开始)
 - [📋 系统要求](#-系统要求)
 - [🤝 贡献与反馈](#-贡献与反馈)
@@ -25,144 +26,67 @@
 
 ## 🛠️ 核心工具
 
-### 1. Net Tune Pro v3 (`net-tune-pro-v3-zh.sh`)
-**推荐！最强大的全功能网络优化方案管理器。** 整合了多种预设优化方案，支持原子化配置与版本保护。现已更新至 v3.3.1，新增 s-ui Hysteria2 专项优化。
+### 1. Net Tune Pro v3 (`net-tune-pro-v3-zh.sh` / `install.sh`)
+**推荐！最强大的全功能网络优化方案管理器。** 整合了多种预设优化方案，支持原子化配置与版本保护。现已更新至 v3.3.1，支持 Hysteria2 1G 内存极致优化。
 
 -   **核心功能**：
-    -   **12 种优化方案**：
-        | 方案 | 适用场景 |
-        |------|----------|
-        | **平衡版** | 通用推荐 (默认) |
-        | **激进版** | 高并发 / 高 PPS 场景 |
-        | **激进稳妥版** | 推荐的激进配置 (兼顾稳定性) |
-        | **UDP 专项版** | **(核心)** s-ui Hysteria2 生产极致版 |
-        | **流媒体代理版** | VLESS / Reality TCP 优化 |
-        | **HTTP 代理版** | Squid / Nginx / Clutch 代理优化 |
-        | **低内存版 (1C/1G)** | 小内存 VPS (防 OOM) |
-        | **低内存版 (2C/2G)** | 中等配置 VPS |
-        | **高带宽版 (1G)** | 千兆物理网卡 |
-        | **高带宽版 (10G)** | 万兆物理网卡 |
-        | **VPS 极致带宽版** | 虚拟网卡 (Virtio)最大化吞吐 |
-        | **晚高峰抗抖动版** | **(推荐)** 解决丢包/拥塞/Bufferbloat |
-    -   **BBR v3 支持**：通过集成 Joey BBR 项目，支持一键安装/管理高性能的 BBR v3 内核。
-    -   **队列算法管理**：支持 FQ、FQ_CODEL、FQ_PIE、CAKE 等多种队列算法。
-    -   **安全机制**：支持冲突检测、永久初始备份、历史快照记录，可随时回滚。
-    -   **实时监控**：内置实时流量与网络统计查看器。
-    -   **智能检测**：自动识别虚拟网卡并提供友好提示。
-    -   **快照清理**：支持自动清理旧快照，保留最近 20 个。
+    -   **12 种优化方案**：涵盖平衡、激进、UDP专项、低内存、高带宽等全场景。
+    -   **BBR v3 支持**：一键安装/管理高性能 BBR v3 内核。
+    -   **队列算法管理**：支持 FQ, FQ_CODEL, CAKE 等。
+    -   **安全机制**：冲突检测、原子化写入、20次历史快照回滚。
+    -   **一键开启 s-ui 优先级**：Nice=-10 提权，确保高负载下代理依然稳定。
 
 ### 2. 端口限速工具 (`Throttle.sh`)
-基于 `tc` 和 `iptables` 的精准端口限速工具，专为 VPS 带宽管理设计。
+基于 `tc` 和 `iptables` 的精准端口限速工具，支持物理网卡自动识别。
 
--   **核心功能**：
-    -   **物理网卡识别**：自动定位 eth/ens/enp 接口，完美避开 Docker、WARP 等虚拟接口。
-    -   **精准双向限速**：支持针对特定 TCP/UDP 端口设置独立的上传下载速率（单位：MB/s）。
-    -   **可视化统计**：实时显示命中包数与流量统计，配置自动持久化。
+-   **核心功能**：支持 TCP/UDP 独立限速，实时流量统计，配置自动持久化。
 
 ### 3. BBR 网络优化脚本 (`bbr.sh`)
-经典的 BBR 开启与系统内核管理工具。
-
--   **核心功能**：
-    -   **内核管理**：支持一键升级至 BBR 适配内核（Debian/Ubuntu/CentOS）。
-    -   **激进模式**：针对高丢包网络优化的激进配置，配合 `fq_codel` 算法降低延迟。
-    -   **一键恢复**：内置预检查机制，确保操作前系统环境符合要求。
+经典的 BBR 开启与系统内核管理工具，提供更激进的拥塞控制配置。
 
 ### 4. GOST 代理部署脚本 (`gost-proxy.sh`)
-极简的 GOST 隧道/代理服务 (v2.0) 部署工具。
-
--   **核心功能**：
-    -   **多协议支持**：轻松部署 SOCKS5、HTTP 及其混合协议，**新增 SSTP VPN 支持**。
-    -   **多节点管理**：支持同时运行多个独立代理节点，独立配置认证信息。
-    -   **智能冲突检测**：内置端口冲突检测，防止端口占用导致服务启动失败。
-    -   **流量转发**：支持 TCP/UDP 端口转发配置。
-    -   **自动守护**：自动配置 Systemd 服务，确保代理进程稳定在线。
+极简的 GOST 隧道部署工具，支持 SOCKS5、HTTP、SSTP 等多协议及多节点管理。
 
 ### 5. nftables 端口转发管理与 NAT 优化 (`nft-forward.sh`)
-**推荐！** 基于 `nftables` 的现代化端口转发工具，现已集成 **NAT 服务器深度优化功能**。
-
--   **核心功能**：
-    -   **二合一设计**：支持交互式添加/删除转发规则，同时提供一键式 NAT 网络调优。
-    -   **智能网络优化**：集成 `nat_optimize` 核心逻辑，支持 LXC/Docker 容器环境，自动优化连接跟踪 (`nf_conntrack`)、ARP 缓存、BBR 拥塞控制及 UDP 缓冲区。
-    -   **表隔离与持久化**：使用专用 `nftables` 表管理，不影响系统其他规则，支持规则自动持久化保存。
-    -   **精准控制**：支持来源 IP 白名单过滤、绑定特定网卡接口、协议分离控制（TCP/UDP/两者）。
-    -   **极简操作**：全交互式菜单，自动配置内核转发及环境依赖。
+基于 `nftables` 的现代化转发工具，集成 NAT 服务器深度调优（Conntrack/ARP/BBR）。
 
 ### 6. HTTP/SOCKS5 代理测速工具 (`http-test.sh`)
-专为代理节点（如 GOST 节点等）设计的命令行测速工具。
+命令行级代理测速，支持延迟测试与 100MB 真实下载测速，输出平均 MB/s。
 
--   **核心功能**：
-    -   **一键测速**：自动测试代理的连通性、各项协议延迟（DNS/TCP/TTFB）以及真实下载速度（100MB 云端样本）。
-    -   **参数直连**：支持通过命令行参数直接传入代理地址（HTTP/SOCKS5），便于自动化与快速复用。
-    -   **防卡死机制**：内置严格的超时管理（60秒上限），遇到失效或极慢节点自动跳出。
-    -   **实时进度**：终端展示下载进度条与实时速度预估，最终输出易懂的平均 MB/s。
-    -   **自动日志**：测试结果会自动保存到 `proxy_speed.log`，方便后续查看记录。
+### 7. 晚高峰网络诊断 (`peak_test.sh`)
+专为诊断晚高峰拥塞设计，检测系统负载、网卡丢包、三网延迟及 Bufferbloat 状态。
 
 ---
 
-## 🚀 快速开始
+## 🚀 快速开始 (一键运行)
 
-### 方式一：克隆仓库运行（推荐）
+直接复制以下命令到终端运行：
+
+| 工具名称 | 一键运行命令 (Curl) |
+| :--- | :--- |
+| **Net Tune Pro v3 (全能优化)** | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/net-tune-pro-v3-zh.sh)` |
+| **端口限速工具** | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/Throttle.sh)` |
+| **BBR 基础优化** | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/bbr.sh)` |
+| **GOST 代理部署** | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/gost-proxy.sh)` |
+| **nftables 转发 & NAT 优化** | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/nft-forward.sh)` |
+| **代理测速工具** | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/http-test.sh)` |
+| **晚高峰网络诊断** | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/peak_test.sh)` |
+| **快捷安装入口 (install.sh)** | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/install.sh)` |
+
+> [!TIP]
+> 运行 `net-tune-pro-v3-zh.sh` 后，可以通过菜单轻松管理系统中的所有网络配置。
+
+---
+
+## 💻 本地克隆运行
 
 ```bash
 git clone https://github.com/suxayii/Throttle.git
 cd Throttle
 chmod +x *.sh
-# 运行 Net Tune Pro v3 (推荐)
-./install.sh
+# 运行主工具
+./net-tune-pro-v3-zh.sh
 ```
-
-### 方式二：一键命令运行
-
-#### 1. Net Tune Pro v3 (全能优化方案 - v3.3.1 推荐)
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/net-tune-pro-v3-zh.sh)
-```
-
-#### 2. 端口限速
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/Throttle.sh)
-```
-
-#### 3. BBR 基础优化
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/bbr.sh)
-```
-
-#### 4. GOST 代理部署
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/gost-proxy.sh)
-```
-
-#### 5. nftables 端口转发 & NAT 优化 (推荐)
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/nft-forward.sh)
-```
-
-#### 6. HTTP/SOCKS5 代理测速
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/http-test.sh)
-```
-
----
-
-## 🛠️ 诊断工具
-
-### 晚高峰网络诊断 (`peak_test.sh`)
-专为诊断晚高峰时段网络拥塞、丢包和延迟抖动设计。
-
--   **功能**：
-    -   系统负载与网卡丢包检测
-    -   关键节点 Ping 测试 (阿里云/腾讯云/Cloudflare/Google)
-    -   路由跳数简易测试
-
-**使用方法**：
-```bash
-# 下载并运行
-wget -O peak_test.sh https://raw.githubusercontent.com/suxayii/Throttle/master/peak_test.sh && chmod +x peak_test.sh && ./peak_test.sh
-```
-
----
-
 
 ## 📋 系统要求
 
