@@ -21,28 +21,58 @@
 
 ## 🚀 快速开始 (一键运行)
 
-> [!IMPORTANT]
-> **一键复制并在终端执行**。所有脚本均支持一键远程运行，无需克隆仓库。
+> [!TIP]
+> **提示**：鼠标悬停在下方代码块右上角，即可看到 GitHub 提供的一键复制按钮。
 
-### 💎 主力工具 (全能优化)
+### 💎 主力工具 (全能网络优化)
 
-**Net Tune Pro v3 (推荐)**
-*整合 12 种优化方案，包含 BBR v3、s-ui 优先级设置、原子化回滚。*
+**Net Tune Pro v3 (全能优化 - 强烈推荐)**
+*整合 12 种优化方案，支持 BBR v3 安装、s-ui 优先级设置、原子化配置保护。*
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/net-tune-pro-v3-zh.sh)
 ```
 
 ### 🛠️ 专项管理工具
 
-| 工具名称 | 功能简述 | 一键运行命令 (点击全选复制) |
-| :--- | :--- | :--- |
-| **端口限速** | `tc+iptables` 精准流控 | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/Throttle.sh)` |
-| **BBR 优化** | 内核级加速/BBR管理 | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/bbr.sh)` |
-| **GOST 部署** | 极简多协议代理部署 | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/gost-proxy.sh)` |
-| **转发 & NAT** | `nftables` 转发与调优 | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/nft-forward.sh)` |
-| **代理测速** | 下载测速/连通性诊断 | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/http-test.sh)` |
-| **晚高峰诊断** | 丢包/抖动/QoS分析 | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/peak_test.sh)` |
-| **s-ui 极致优先级** | **(NEW)** Nice -20 & 实时调度 | `bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/s-20.sh)` |
+**1. 端口限速工具 (`tc` + `iptables` 精准流控)**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/Throttle.sh)
+```
+
+**2. BBR 优化脚本 (内核级加速与内核管理)**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/bbr.sh)
+```
+
+**3. GOST 代理部署 (极简多协议隧道部署)**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/gost-proxy.sh)
+```
+
+**4. 转发 & NAT 调优 (基于 `nftables` 的现代化转发)**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/nft-forward.sh)
+```
+
+**5. 代理测速工具 (下载测速与连通性诊断)**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/http-test.sh)
+```
+
+**6. 晚高峰网络诊断 (丢包/抖动/QoS 实时分析)**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/peak_test.sh)
+```
+
+**7. s-ui 极致优先级提权 (Nice -20 & FIFO 90)**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/s-20.sh)
+```
+
+**8. 快捷安装入口 (`install.sh`)**
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/install.sh)
+```
 
 ---
 
@@ -76,8 +106,8 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/net-tu
 - **架构**: x86_64, ARM64 (部分脚本支持)
 - **权限**: 必须以 `root` 用户运行
 
-> [!TIP]
-> 如果你在国内运行，请确保网络环境能够正常访问 `raw.githubusercontent.com`。
+> [!IMPORTANT]
+> 执行任何优化前，建议先通过 `install.sh` 进行初始备份。
 
 ## 🤝 贡献与反馈
 
