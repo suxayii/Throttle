@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==========================================================
-# 中国大陆晚高峰网络质量增强诊断工具 (CN Peak Pro v2.1)
-# 优化版：修复TCP测试 + 增强评分算法 + 修复Locale解析 + 精准测速
+# 中国大陆晚高峰网络质量增强诊断工具 (CN Peak Pro v2.2)
+# 优化版：修复TCP测试 + 增强评分算法 + 修复Locale + 新增路由推断
 # ==========================================================
 
 RED='\033[31m'
@@ -122,6 +122,52 @@ score_calc() {
     echo $score
 }
 
+# ==================== 回程路由智能推断 ====================
+route_analysis() {
+    local ip=$1
+    local isp=$2
+    # 运行 MTR 提取 IP 路径 (只发2个包加快探测速度)
+    local trace=$(mtr -4 -n -c 2 -r "$ip" 2>/dev/null)
+    local route_type="${RED}未知 / 疑似绕路${PLAIN}"
+
+    case "$isp" in
+        "电信")
+            if echo "$trace" | grep -q "59.43."; then
+                route_type="${GREEN}CN2 优质直连 (特征: 59.43.*)${PLAIN}"
+            elif echo "$trace" | grep -q "202.97."; then
+                route_type="${YELLOW}163 骨干直连 (特征: 202.97.*)${PLAIN}"
+            fi
+            ;;
+        "联通")
+            if echo "$trace" | grep -qE "218.105.|210.51."; then
+                route_type="${GREEN}AS9929 优质直连 (CUPM)${PLAIN}"
+            elif echo "$trace" | grep -q "219.158."; then
+                route_type="${YELLOW}AS4837 骨干直连${PLAIN}"
+            fi
+            ;;
+        "移动")
+            if echo "$trace" | grep -q "58.253."; then
+                route_type="${GREEN}CMIN2 优质直连 (AS58453)${PLAIN}"
+            elif echo "$trace" | grep -q "223.120."; then
+                route_type="${YELLOW}CMI 骨干直连 (特征: 223.120.*)${PLAIN}"
+            fi
+            ;;
+    esac
+
+    # 兜底检测：如果跳数异常多，大概率是绕路
+    local hops=$(echo "$trace" | grep -v "Start" | grep -v "HOST" | wc -l)
+    if (( hops > 22 )); then
+        route_type="${RED}严重绕路 (跳数 $hops > 22)${PLAIN}"
+    fi
+    
+    # 如果没匹配到高端特征，但跳数在正常范围内
+    if [[ "$route_type" == "${RED}未知 / 疑似绕路${PLAIN}" && $hops -le 22 ]]; then
+        route_type="${YELLOW}普通直连 / 动态中转线路${PLAIN}"
+    fi
+
+    echo "$route_type"
+}
+
 bufferbloat_test() {
     log "开始 Bufferbloat 测试..."
     
@@ -160,13 +206,13 @@ bufferbloat_test() {
 
 start_test() {
     clear
-    echo -e "${BLUE}====== 中国大陆晚高峰增强诊断 (v2.1) ======${PLAIN}"
+    echo -e "${BLUE}====== 中国大陆晚高峰增强诊断 (v2.2) ======${PLAIN}"
     log "开始测试（优化版）"
 
     local nic=$(get_nic)
     [ -z "$nic" ] && nic="eth0"
 
-    echo -e "\n${YELLOW}[1/6] 系统资源检查${PLAIN}"
+    echo -e "\n${YELLOW}[1/7] 系统资源检查${PLAIN}"
     local load=$(awk '{print $1}' /proc/loadavg)
     local mem=$(free -m | awk '/Mem:/ {print $3"/"$2"MB"}')
     local tcp=$(ss -tun state established | wc -l)
@@ -189,7 +235,7 @@ start_test() {
         fi
     fi
 
-    echo -e "\n${YELLOW}[2/6] 三网 Ping 测试${PLAIN}"
+    echo -e "\n${YELLOW}[2/7] 三网 Ping 测试${PLAIN}"
 
     local targets=(
     "223.215.161.220 电信"
@@ -209,7 +255,7 @@ start_test() {
         printf "%-15s %-8s %-8s %-8s %-8s %-8s\n" "$ip" "$isp" "${loss}%" "${avg}ms" "${jitter}ms" "$score/10"
     done
 
-    echo -e "\n${YELLOW}[3/6] TCP 连接延迟测试${PLAIN}"
+    echo -e "\n${YELLOW}[3/7] TCP 连接延迟测试${PLAIN}"
     local tcp_time=$(tcp_test www.baidu.com)   # ← 已修复
     log "TCP建连时间: ${tcp_time}s"
     if [[ "$tcp_time" == "超时" ]]; then
@@ -218,21 +264,33 @@ start_test() {
         echo -e "TCP建连时间: ${tcp_time}s"
     fi
 
-    echo -e "\n${YELLOW}[4/6] MTR 路由检测${PLAIN}"
-    mtr -r -c 20 223.5.5.5 | head -n 20
+    echo -e "\n${YELLOW}[4/7] 基础 MTR 路由检测 (原始数据)${PLAIN}"
+    mtr -r -c 10 223.5.5.5 | head -n 20
 
-    echo -e "\n${YELLOW}[5/6] Bufferbloat 检测${PLAIN}"
+    echo -e "\n${YELLOW}[5/7] 三网回程路由智能分析 (核心指标)${PLAIN}"
+    printf "%-6s %-16s %s\n" "运营商" "目标测试IP" "推测线路类型"
+    echo "--------------------------------------------------"
+    local route_res
+    for item in "${targets[@]}"; do
+        ip=$(echo $item | awk '{print $1}')
+        isp=$(echo $item | awk '{print $2}')
+        route_res=$(route_analysis "$ip" "$isp")
+        printf "%-9s %-16s %b\n" "$isp" "$ip" "$route_res"
+    done
+    echo "--------------------------------------------------"
+
+    echo -e "\n${YELLOW}[6/7] Bufferbloat 检测${PLAIN}"
     bufferbloat_test
 
-    echo -e "\n${YELLOW}[6/6] 综合诊断${PLAIN}"
+    echo -e "\n${YELLOW}[7/7] 综合诊断${PLAIN}"
     echo "--------------------------------------------------"
     echo "移动评分低  → 晚高峰不适合移动用户"
-    echo "三网都低    → VPS 出口严重拥塞"
+    echo "线路遇绕路  → 建议更换 CN2 GIA/AS9929 等优质线路"
     echo "TCP高但ICMP正常 → 可能是QoS/限速"
-    echo "评分<5分    → 建议换线路（CN2 GIA/IPLC）"
+    echo "评分<5分    → 晚高峰体验较差"
     echo "--------------------------------------------------"
 
-    log "测试结束（v2.1）"
+    log "测试结束（v2.2）"
     echo -e "${GREEN}测试完成！日志: $LOG_FILE${PLAIN}"
     echo -e "${YELLOW}建议：晚高峰 20:00-22:00 运行效果最佳${PLAIN}"
 }
