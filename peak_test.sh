@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==========================================================
-# 中国大陆晚高峰网络质量增强诊断工具 (CN Peak Pro Edition)
-# 专用于检测 VPS 在中国大陆晚高峰的真实使用情况
+# 中国大陆晚高峰网络质量增强诊断工具 (CN Peak Pro v2.1)
+# 优化版：修复TCP测试 + 增强评分算法 + 修复Locale解析 + 精准测速
 # ==========================================================
 
 RED='\033[31m'
@@ -25,7 +25,7 @@ check_root() {
 }
 
 install_if_missing() {
-    for cmd in mtr bc curl; do
+    for cmd in mtr bc curl wget; do
         if ! command -v $cmd >/dev/null 2>&1; then
             if command -v apt >/dev/null; then
                 apt update && apt install -y $cmd
@@ -58,7 +58,7 @@ bandwidth_check() {
     if (( drop_diff > 0 )); then
         echo -e "${RED}严重警告: 检测到网卡丢包增长 (RX_dropped +${drop_diff}/s)${PLAIN}"
         log "WARNING: RX_dropped increased by ${drop_diff}"
-        echo -e "${YELLOW}建议运行 install.sh -> 12) 网卡/系统级深度优化 以增加 Ring Buffer${PLAIN}"
+        echo -e "${YELLOW}建议运行 ethtool 或调整 netdev_max_backlog 增加 Ring Buffer${PLAIN}"
     else
         echo -e "${GREEN}丢包监控: 正常 (无新增丢包)${PLAIN}"
     fi
@@ -68,25 +68,23 @@ ping_test() {
     local ip=$1
     local desc=$2
 
-    local res=$(ping -c 20 -i 0.2 -q "$ip" 2>/dev/null)
-    # 退出码非0 或 找不到 rtt 行（说明100%丢失）
-    if [ $? -ne 0 ] || ! echo "$res" | grep -q "rtt"; then
+    # 使用 LC_ALL=C 强制标准 POSIX 英文输出，杜绝多语言环境导致的 grep 失效
+    local res=$(LC_ALL=C ping -c 20 -i 0.2 -q "$ip" 2>/dev/null)
+    
+    if [ $? -ne 0 ] || ! echo "$res" | grep -qi "rtt"; then
         echo "100 999 999"
         return
     fi
 
-    # 使用 awk 提取丢包率，兼容性更好
-    local loss=$(echo "$res" | awk -F', ' '/packet loss/ {print $3}' | awk '{print $1}' | tr -d '%')
-    # 备用提取逻辑
-    if [[ -z "$loss" ]]; then
-       loss=$(echo "$res" | grep -oE '[0-9]+% packet loss' | awk '{print $1}' | tr -d '%')
-    fi
-
-    local rtt=$(echo "$res" | grep "rtt")
-    local avg=$(echo "$rtt" | awk -F'/' '{print $5}')
-    local mdev=$(echo "$rtt" | awk -F'/' '{print $7}' | awk '{print $1}')
+    # 提取丢包率：精准匹配并提取数字
+    local loss=$(echo "$res" | grep -i "packet loss" | awk -F'%' '{print $1}' | awk '{print $NF}')
     
-    # 防止空值导致后续计算报错
+    # 提取 RTT 延迟：提取 avg 和 mdev(抖动)
+    local rtt_vals=$(echo "$res" | grep -i "rtt" | awk -F'=' '{print $2}')
+    local avg=$(echo "$rtt_vals" | awk -F'/' '{print $2}')
+    local mdev=$(echo "$rtt_vals" | awk -F'/' '{print $4}' | awk '{print $1}')
+    
+    # 兜底机制
     [[ -z "$loss" ]] && loss=100
     [[ -z "$avg" ]] && avg=999
     [[ -z "$mdev" ]] && mdev=999
@@ -95,116 +93,148 @@ ping_test() {
 }
 
 tcp_test() {
-    local ip=$1
-    curl -o /dev/null -s -w "%{time_connect}\n" http://$ip 2>/dev/null
+    local target=$1
+    # 修复版：使用 baidu.com + 超时保护 + 强制IPv4
+    curl -o /dev/null -s -w "%{time_connect}\n" --max-time 3 -4 "http://$target" 2>/dev/null || echo "超时"
 }
 
-bufferbloat_test() {
-    log "开始 Bufferbloat 测试..."
-    local idle=$(ping -c 10 -q 223.5.5.5 | grep rtt | awk -F'/' '{print $5}')
-    wget -O /dev/null http://speedtest.tele2.net/10MB.zip >/dev/null 2>&1 &
-    sleep 2
-    local load=$(ping -c 10 -q 223.5.5.5 | grep rtt | awk -F'/' '{print $5}')
-    killall wget >/dev/null 2>&1
-
-    log "空闲延迟: ${idle}ms"
-    log "满载延迟: ${load}ms"
-
-    diff=$(echo "$load - $idle" | bc)
-    if (( $(echo "$diff > 100" | bc -l) )); then
-        echo -e "${RED}严重 Bufferbloat (${diff}ms)${PLAIN}"
-    elif (( $(echo "$diff > 30" | bc -l) )); then
-        echo -e "${YELLOW}中度 Bufferbloat (${diff}ms)${PLAIN}"
-    else
-        echo -e "${GREEN}Bufferbloat 正常${PLAIN}"
-    fi
-}
-
+# ==================== 增强版评分算法 ====================
 score_calc() {
     local loss=$1
-    local jitter=$2
-    score=10
+    local avg=$2      # 平均延迟权重
+    local jitter=$3
+    local score=10
 
+    # 原有逻辑
     if (( loss > 5 )); then score=$((score-3)); fi
     if (( $(echo "$jitter > 30" | bc -l) )); then score=$((score-2)); fi
     if (( loss > 20 )); then score=2; fi
 
+    # 新增：平均延迟惩罚（晚高峰核心体验）
+    if (( $(echo "$avg > 200" | bc -l) )); then 
+        score=$((score-4))
+    elif (( $(echo "$avg > 150" | bc -l) )); then 
+        score=$((score-2))
+    fi
+
+    # 防止负分
+    (( score < 0 )) && score=0
     echo $score
+}
+
+bufferbloat_test() {
+    log "开始 Bufferbloat 测试..."
+    
+    # 测量空闲延迟
+    local idle=$(LC_ALL=C ping -c 10 -q 223.5.5.5 | grep -i rtt | awk -F'=' '{print $2}' | awk -F'/' '{print $2}')
+    
+    # 使用 1GB 测速文件确保大带宽也能被占满
+    wget -O /dev/null http://speedtest.tele2.net/1GB.zip >/dev/null 2>&1 &
+    local wget_pid=$!
+    
+    # 给 TCP 拥塞控制算法提速预留 3 秒
+    sleep 3 
+    
+    # 测量满载延迟
+    local load=$(LC_ALL=C ping -c 10 -q 223.5.5.5 | grep -i rtt | awk -F'=' '{print $2}' | awk -F'/' '{print $2}')
+    
+    # 精准结束后台的 wget 测试进程
+    kill $wget_pid >/dev/null 2>&1
+
+    # 兜底防止空值运算报错
+    [[ -z "$idle" ]] && idle=0
+    [[ -z "$load" ]] && load=0
+
+    log "空闲延迟: ${idle}ms"
+    log "满载延迟: ${load}ms"
+
+    local diff=$(echo "$load - $idle" | bc)
+    if (( $(echo "$diff > 100" | bc -l) )); then
+        echo -e "${RED}严重 Bufferbloat (${diff}ms) -> 建议开启 BBR 或 SQM${PLAIN}"
+    elif (( $(echo "$diff > 30" | bc -l) )); then
+        echo -e "${YELLOW}中度 Bufferbloat (${diff}ms)${PLAIN}"
+    else
+        echo -e "${GREEN}Bufferbloat 正常 (${diff}ms)${PLAIN}"
+    fi
 }
 
 start_test() {
     clear
-    echo -e "${BLUE}====== 中国大陆晚高峰增强诊断 ======${PLAIN}"
-    log "开始测试"
+    echo -e "${BLUE}====== 中国大陆晚高峰增强诊断 (v2.1) ======${PLAIN}"
+    log "开始测试（优化版）"
 
     local nic=$(get_nic)
     [ -z "$nic" ] && nic="eth0"
 
     echo -e "\n${YELLOW}[1/6] 系统资源检查${PLAIN}"
-    load=$(awk '{print $1}' /proc/loadavg)
-    mem=$(free -m | awk '/Mem:/ {print $3"/"$2"MB"}')
-    tcp=$(ss -tun state established | wc -l)
+    local load=$(awk '{print $1}' /proc/loadavg)
+    local mem=$(free -m | awk '/Mem:/ {print $3"/"$2"MB"}')
+    local tcp=$(ss -tun state established | wc -l)
 
     log "负载: $load"
     log "内存: $mem"
     log "TCP连接: $tcp"
 
-    rx_drop=$(cat /sys/class/net/$nic/statistics/rx_dropped)
-    tx_drop=$(cat /sys/class/net/$nic/statistics/tx_dropped)
+    local rx_drop=$(cat /sys/class/net/$nic/statistics/rx_dropped)
+    local tx_drop=$(cat /sys/class/net/$nic/statistics/tx_dropped)
     log "网卡丢包: RX=$rx_drop TX=$tx_drop"
 
     bandwidth_check $nic
 
-    # 检查 TC 规则 (新增)
     if command -v tc >/dev/null; then
         local tc_qdisc=$(tc qdisc show dev $nic 2>/dev/null | head -n 1)
-        if [[ -n "$tc_qdisc" ]]; then
-            log "当前流量控制 (TC): $tc_qdisc"
-            if echo "$tc_qdisc" | grep -qE "htb|tbf|prio"; then
-                echo -e "${RED}警告: 检测到活跃的限速规则 (htb/tbf)，这可能是速度异常的原因！${PLAIN}"
-                log "警告: 检测到限速规则"
-            fi
+        if [[ -n "$tc_qdisc" && "$tc_qdisc" =~ htb|tbf|prio ]]; then
+            echo -e "${RED}警告: 检测到活跃的限速规则 (htb/tbf)，可能是速度异常主因！${PLAIN}"
+            log "警告: 检测到限速规则"
         fi
     fi
 
     echo -e "\n${YELLOW}[2/6] 三网 Ping 测试${PLAIN}"
 
-    targets=(
+    local targets=(
     "223.215.161.220 电信"
     "211.91.88.175 联通"
     "221.179.155.161 移动"
     )
 
-    printf "%-15s %-8s %-8s %-8s %-8s\n" "IP" "运营商" "丢包" "延迟" "评分"
+    printf "%-15s %-8s %-8s %-8s %-8s %-8s\n" "IP" "运营商" "丢包" "延迟" "抖动" "评分"
 
+    local ip isp loss avg jitter score
     for item in "${targets[@]}"; do
         ip=$(echo $item | awk '{print $1}')
         isp=$(echo $item | awk '{print $2}')
         read loss avg jitter <<< $(ping_test $ip $isp)
-        score=$(score_calc $loss $jitter)
+        score=$(score_calc $loss $avg $jitter)   # ← 增强版调用
 
-        printf "%-15s %-8s %-8s %-8s %-8s\n" "$ip" "$isp" "${loss}%" "${avg}ms" "$score/10"
+        printf "%-15s %-8s %-8s %-8s %-8s %-8s\n" "$ip" "$isp" "${loss}%" "${avg}ms" "${jitter}ms" "$score/10"
     done
 
     echo -e "\n${YELLOW}[3/6] TCP 连接延迟测试${PLAIN}"
-    tcp_time=$(tcp_test 223.5.5.5)
+    local tcp_time=$(tcp_test www.baidu.com)   # ← 已修复
     log "TCP建连时间: ${tcp_time}s"
+    if [[ "$tcp_time" == "超时" ]]; then
+        echo -e "${RED}TCP建连超时（可能出口限制）${PLAIN}"
+    else
+        echo -e "TCP建连时间: ${tcp_time}s"
+    fi
 
     echo -e "\n${YELLOW}[4/6] MTR 路由检测${PLAIN}"
-    mtr -r -c 20 223.5.5.5 | head -n 15
+    mtr -r -c 20 223.5.5.5 | head -n 20
 
     echo -e "\n${YELLOW}[5/6] Bufferbloat 检测${PLAIN}"
     bufferbloat_test
 
     echo -e "\n${YELLOW}[6/6] 综合诊断${PLAIN}"
     echo "--------------------------------------------------"
-    echo "如果移动评分低，晚高峰不适合移动用户"
-    echo "如果三网都低，说明 VPS 出口拥塞"
-    echo "如果 TCP 高但 ICMP 正常，可能 QoS 限速"
+    echo "移动评分低  → 晚高峰不适合移动用户"
+    echo "三网都低    → VPS 出口严重拥塞"
+    echo "TCP高但ICMP正常 → 可能是QoS/限速"
+    echo "评分<5分    → 建议换线路（CN2 GIA/IPLC）"
     echo "--------------------------------------------------"
 
-    log "测试结束"
-    echo -e "${GREEN}测试完成，日志: $LOG_FILE${PLAIN}"
+    log "测试结束（v2.1）"
+    echo -e "${GREEN}测试完成！日志: $LOG_FILE${PLAIN}"
+    echo -e "${YELLOW}建议：晚高峰 20:00-22:00 运行效果最佳${PLAIN}"
 }
 
 install_if_missing
