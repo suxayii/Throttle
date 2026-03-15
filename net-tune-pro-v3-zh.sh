@@ -102,6 +102,14 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 20
 net.ipv4.ip_local_port_range = 10240 65535
 net.ipv4.tcp_slow_start_after_idle = 0
+
+# 全局文件描述符限制
+fs.file-max = 1048576
+fs.nr_open = 1048576
+
+# Busy Poll (低延迟网络轮询，牺牲一点 CPU 换取更低的延迟)
+net.core.busy_read = 50
+net.core.busy_poll = 50
 CONF
 }
 profile_balanced(){ cat <<'CONF'
@@ -109,14 +117,18 @@ profile_balanced(){ cat <<'CONF'
 net.core.netdev_max_backlog = 65536
 net.core.somaxconn = 16384
 net.ipv4.tcp_max_syn_backlog = 65536
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
 net.ipv4.tcp_rmem = 4096 87380 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
+net.ipv4.udp_rmem_min = 81920
+net.ipv4.udp_wmem_min = 81920
+
+# 网卡软中断拥塞优化 (缓解 CPU 软中断争用)
+net.core.netdev_budget = 300
+net.core.netdev_budget_usecs = 4000
 CONF
 }
 profile_aggressive(){ cat <<'CONF'
@@ -124,15 +136,19 @@ profile_aggressive(){ cat <<'CONF'
 net.core.netdev_max_backlog = 250000
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 262144
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
 net.ipv4.tcp_rmem = 4096 87380 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
+net.ipv4.udp_rmem_min = 81920
+net.ipv4.udp_wmem_min = 81920
 net.ipv4.tcp_fin_timeout = 15
+
+# 网卡软中断拥塞优化
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 8000
 CONF
 }
 profile_aggressive_safe(){ cat <<'CONF'
@@ -140,14 +156,18 @@ profile_aggressive_safe(){ cat <<'CONF'
 net.core.netdev_max_backlog = 131072
 net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 131072
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
 net.ipv4.tcp_rmem = 4096 87380 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
+net.ipv4.udp_rmem_min = 81920
+net.ipv4.udp_wmem_min = 81920
+
+# 网卡软中断拥塞优化
+net.core.netdev_budget = 300
+net.core.netdev_budget_usecs = 4000
 CONF
 }
 profile_udp_quic(){
@@ -190,8 +210,8 @@ profile_udp_quic(){
         UDP_MIN=65536
         UDP_PRESSURE=131072
         UDP_MAX=262144
-        U_RMEM_MIN=16384
-        U_WMEM_MIN=16384
+        U_RMEM_MIN=81920
+        U_WMEM_MIN=81920
         BUDGET=1200
         BUDGET_USECS=25000
         echo "# 1核1G强制低配UDP内存（按需分配极大提高并发）"
@@ -204,8 +224,8 @@ profile_udp_quic(){
         [ "$UDP_MIN" -lt 65536 ] && UDP_MIN=65536
         [ "$UDP_PRESSURE" -lt 131072 ] && UDP_PRESSURE=131072
         [ "$UDP_MAX" -lt 262144 ] && UDP_MAX=262144
-        U_RMEM_MIN=16384
-        U_WMEM_MIN=16384
+        U_RMEM_MIN=81920
+        U_WMEM_MIN=81920
         BUDGET=1200
         BUDGET_USECS=25000
     fi
@@ -217,9 +237,9 @@ cat <<CONF
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 
-net.core.rmem_default = 262144
+net.core.rmem_default = 1048576
 net.core.rmem_max = $RMAX
-net.core.wmem_default = 262144
+net.core.wmem_default = 1048576
 net.core.wmem_max = $RMAX
 
 # TCP 必然共存：s-ui 面板/DNS/伪装站
@@ -258,9 +278,9 @@ net.ipv4.tcp_reordering = 6
 net.ipv4.tcp_recovery = 1
 
 # ---- 晚高峰自适应增强 ----
-# 加大软中断预算：高峰期包量暴增时内核有足够处理时间
-net.core.netdev_budget = $BUDGET
-net.core.netdev_budget_usecs = $BUDGET_USECS
+# 加大软中断预算：高峰期包量暴增时内核有足够处理时间，缓解软中断拥塞
+net.core.netdev_budget = 1200
+net.core.netdev_budget_usecs = 25000
 # 连接快速回收：高峰期 TIME_WAIT 堆积会耗尽端口
 net.ipv4.tcp_max_tw_buckets = 65536
 # 孤儿连接上限：防止半关闭连接占满内存
@@ -1206,7 +1226,7 @@ apply_system_optimizations(){
   line
 
   # ===== 1. Virtio 多队列 (Multiqueue) =====
-  echo -e "${BOLD}[1/5] Virtio 多队列${NC}"
+  echo -e "${BOLD}[1/6] Virtio 多队列${NC}"
   if cmd_exists ethtool; then
     local max_combined current_combined
     max_combined="$(ethtool -l "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/Combined:/){print $2; exit}}')"
@@ -1226,9 +1246,10 @@ apply_system_optimizations(){
   fi
 
   # ===== 2. RPS / RFS（软件级多核分发） =====
-  echo -e "${BOLD}[2/5] RPS / RFS 多核分发${NC}"
+  echo -e "${BOLD}[2/6] RPS / RFS 多核分发${NC}"
   local rps_mask
   rps_mask="$(printf '%x' $(( (1 << cpu_count) - 1 )))"
+
 
   local rps_applied=0
   local queue_dir
@@ -1254,7 +1275,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 3. 网卡 Ring Buffer 加大 =====
-  echo -e "${BOLD}[3/5] Ring Buffer${NC}"
+  echo -e "${BOLD}[3/6] Ring Buffer${NC}"
   local max_rx="256" max_tx="256"
   if cmd_exists ethtool; then
     max_rx="$(ethtool -g "$nic" 2>/dev/null | awk '/^Pre-set/,/^Current/{if(/RX:/){print $2}}' | head -1 || true)"
@@ -1273,7 +1294,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 4. 硬件卸载（GSO/GRO/TSO） =====
-  echo -e "${BOLD}[4/5] 硬件卸载检查${NC}"
+  echo -e "${BOLD}[4/6] 硬件卸载检查${NC}"
   if cmd_exists ethtool; then
     for feat in gso gro tso; do
       # ethtool -k 输出的是长名称，需要映射
@@ -1303,7 +1324,7 @@ apply_system_optimizations(){
   fi
 
   # ===== 5. 中断合并（减少 CPU 开销） =====
-  echo -e "${BOLD}[5/5] 中断合并${NC}"
+  echo -e "${BOLD}[5/6] 中断合并 (Interrupt Coalescing)${NC}"
   if cmd_exists ethtool; then
     if ethtool -C "$nic" adaptive-rx on adaptive-tx on 2>/dev/null; then
       ok "自适应中断合并已开启"
@@ -1312,6 +1333,69 @@ apply_system_optimizations(){
     fi
   else
     warn "未安装 ethtool，跳过中断合并设置"
+  fi
+
+  # ===== 6. 网卡硬中断亲和性 (IRQ Affinity) =====
+  echo -e "${BOLD}[6/6] 网卡硬中断亲和性 (IRQ Affinity)${NC}"
+  local irq_applied=0
+  if cmd_exists awk && cmd_exists grep; then
+    # 查找属于该网卡的 IRQ 号
+    local irqs=()
+    while IFS= read -r line; do
+      local irq=$(echo "$line" | awk -F: '{print $1}' | tr -d ' ')
+      # 确认该 IRQ 在 /proc/irq/ 目录下存在 smp_affinity
+      if [[ -f "/proc/irq/$irq/smp_affinity" ]]; then
+          irqs+=("$irq")
+      fi
+    done < <(grep -E "${nic}" /proc/interrupts 2>/dev/null)
+
+    if (( ${#irqs[@]} > 0 )); then
+      local n=0
+      for irq_num in "${irqs[@]}"; do
+        # 将不同的 IRQ 尽量均匀绑定到不同核心 (1, 2, 4, 8, ...)
+        local cpu_idx=$(( n % cpu_count ))
+        local cur_mask="$(printf '%x' $(( 1 << cpu_idx )))"
+        if echo "$cur_mask" > "/proc/irq/$irq_num/smp_affinity" 2>/dev/null; then
+          irq_applied=$((irq_applied + 1))
+        fi
+        n=$((n + 1))
+      done
+      ok "硬中断已绑定（影响了 $irq_applied 个 IRQ）"
+    else
+      info "未在 /proc/interrupts 找到属于 $nic 的队列硬中断"
+    fi
+  else
+    warn "缺少 awk/grep，跳过中断亲和性设置"
+  fi
+  
+  # 全局文件描述符优化
+  echo -e "${BOLD}[附加] 全局文件描述符上限修改${NC}"
+  if grep -q "DefaultLimitNOFILE" /etc/systemd/system.conf 2>/dev/null; then
+      sed -i 's/^.*DefaultLimitNOFILE.*/DefaultLimitNOFILE=1048576/' /etc/systemd/system.conf
+  else
+      echo "DefaultLimitNOFILE=1048576" >> /etc/systemd/system.conf
+  fi
+  if grep -q "DefaultLimitNPROC" /etc/systemd/system.conf 2>/dev/null; then
+      sed -i 's/^.*DefaultLimitNPROC.*/DefaultLimitNPROC=65536/' /etc/systemd/system.conf
+  else
+      echo "DefaultLimitNPROC=65536" >> /etc/systemd/system.conf
+  fi
+  systemctl daemon-reload
+  ok "已更新 systemd 全局 DefaultLimitNOFILE=1048576"
+  
+  # security limits
+  if [[ -f /etc/security/limits.conf ]]; then
+    # clean old
+    sed -i '/^\*.*nofile/d' /etc/security/limits.conf
+    sed -i '/^root.*nofile/d' /etc/security/limits.conf
+    # insert new
+    cat >> /etc/security/limits.conf <<EOF
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+EOF
+    ok "已更新 /etc/security/limits.conf 全局限制规则"
   fi
 
   line
