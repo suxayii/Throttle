@@ -1296,13 +1296,14 @@ apply_system_optimizations(){
   # ===== 4. 硬件卸载（GSO/GRO/TSO） =====
   echo -e "${BOLD}[4/6] 硬件卸载检查${NC}"
   if cmd_exists ethtool; then
-    for feat in gso gro tso; do
+    for feat in gso gro tso rx-udp-gro-forwarding; do
       # ethtool -k 输出的是长名称，需要映射
       local long_feat=""
       case "$feat" in
         gso) long_feat="generic-segmentation-offload" ;;
         gro) long_feat="generic-receive-offload" ;;
         tso) long_feat="tcp-segmentation-offload" ;;
+        rx-udp-gro-forwarding) long_feat="rx-udp-gro-forwarding" ;;
       esac
 
       local status
@@ -1478,7 +1479,7 @@ if [[ -d /sys/class/net/\$nic ]]; then
   # Ring Buffer
   ethtool -G \$nic rx $max_rx tx $max_tx 2>/dev/null
   # Offload
-  ethtool -K \$nic gso on gro on tso on 2>/dev/null
+  ethtool -K \$nic gso on gro on tso on rx-udp-gro-forwarding on 2>/dev/null
   # RPS
   for q in /sys/class/net/\$nic/queues/rx-*; do
     echo $rps_mask > \$q/rps_cpus 2>/dev/null
