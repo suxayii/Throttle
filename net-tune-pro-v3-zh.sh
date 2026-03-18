@@ -800,6 +800,37 @@ precheck(){
   fi
   echo
 
+  echo -e "${BOLD}=== Busy Poll 设置 ===${NC}"
+  sysctl net.core.busy_poll net.core.busy_read 2>/dev/null || echo "  无法读取"
+  echo
+
+  echo -e "${BOLD}=== 网卡 MTU 参数 ===${NC}"
+  if [[ -n "${nic:-}" ]]; then
+    ip link show "$nic" 2>/dev/null | grep -o 'mtu [0-9]*' || echo "  无法读取"
+  else
+    echo "  未检测到默认网卡"
+  fi
+  echo
+
+  echo -e "${BOLD}=== GRO (Generic Receive Offload) 状态 ===${NC}"
+  if [[ -n "${nic:-}" ]] && cmd_exists ethtool; then
+    local _gro_info
+    _gro_info=$(ethtool -k "$nic" 2>/dev/null | grep gro || true)
+    if [[ -n "$_gro_info" ]]; then
+      echo "$_gro_info"
+      if echo "$_gro_info" | grep -q -w "on"; then
+        warn "检测到 GRO 相关项 ($nic) 处于开启状态 (建议关闭以优化性能)"
+      else
+        ok "$nic GRO 相关项已全部关闭"
+      fi
+    else
+      echo "  无法获取 $nic 的 GRO 信息"
+    fi
+  else
+    echo "  无法读取 GRO 状态 (缺少 ethtool 或未找到网卡)"
+  fi
+  echo
+
   echo -e "${BOLD}=== 适合代理建议 ===${NC}"
   echo -e "  ${GREEN}推荐配置: BBR + fq + txqueuelen>=8192 + netdev_max_backlog>=16384${NC}"
   echo "  查看上面各项是否满足判断即可"
