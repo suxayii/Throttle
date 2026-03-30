@@ -90,6 +90,34 @@ ensure_mtr(){
   return 1
 }
 
+ensure_zram(){
+  if [ -f "/etc/default/zramswap" ] || systemctl list-unit-files zramswap.service >/dev/null 2>&1; then
+    return 0
+  fi
+
+  info "未检测到 zram-tools，正在尝试自动安装..."
+  if is_debian_like; then
+    apt-get update -y >/dev/null 2>&1 || true
+    if apt-get install -y zram-tools >/dev/null 2>&1; then
+      ok "zram-tools 安装成功"
+      return 0
+    fi
+  elif cmd_exists yum; then
+    if yum install -y zram-tools 2>/dev/null || yum install -y zram 2>/dev/null; then
+      ok "zram 相关组件安装成功"
+      return 0
+    fi
+  elif cmd_exists dnf; then
+    if dnf install -y zram-tools 2>/dev/null || dnf install -y zram-generator 2>/dev/null; then
+      ok "zram 相关组件安装成功"
+      return 0
+    fi
+  fi
+
+  err "zram-tools 自动安装失败，请手动安装后重试。"
+  return 1
+}
+
 # ===================== 网络优化方案模板 =====================
 common_base() {
   local cpu_cores
@@ -1909,6 +1937,9 @@ daily_restart_optimization(){
   echo
   echo -e "${BOLD}【zram + swappiness + s-ui 每日重启优化】${NC}"
   line
+
+  # 0. 确保 zram 已安装
+  ensure_zram || return 1
 
   local CONFIG="/etc/default/zramswap"
 
