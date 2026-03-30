@@ -1854,7 +1854,7 @@ sysctl -w net.netfilter.nf_conntrack_tcp_timeout_time_wait=30 2>/dev/null || tru
 sysctl -w net.netfilter.nf_conntrack_udp_timeout=30 2>/dev/null || true
 sysctl -w net.netfilter.nf_conntrack_udp_timeout_stream=60 2>/dev/null || true
 # Buffer size and Send queue
-sysctl -w net.ipv4.udp_mem="65536 131072 262144" 2>/dev/null || true
+sysctl -w net.ipv4.udp_mem=\"65536 131072 262144\" 2>/dev/null || true
 sysctl -w net.ipv4.tcp_notsent_lowat=16384 2>/dev/null || true
 # CPU performance
 for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
