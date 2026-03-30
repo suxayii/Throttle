@@ -91,30 +91,58 @@ ensure_mtr(){
 }
 
 ensure_zram(){
-  if [ -f "/etc/default/zramswap" ] || systemctl list-unit-files zramswap.service >/dev/null 2>&1; then
+  # 检测 zramswap 是否真正已安装（list-unit-files 即使服务不存在也返回 0，必须 grep 验证）
+  if systemctl list-unit-files zramswap.service 2>/dev/null | grep -q 'zramswap\.service'; then
+    return 0
+  fi
+  # 兜底：检查 zram 内核模块是否已加载且有活跃设备
+  if lsmod 2>/dev/null | grep -q '^zram ' && [ -b /dev/zram0 ]; then
     return 0
   fi
 
-  info "未检测到 zram-tools，正在尝试自动安装..."
+  info "未检测到 zram，正在尝试自动安装..."
   if is_debian_like; then
     apt-get update -y >/dev/null 2>&1 || true
     if apt-get install -y zram-tools >/dev/null 2>&1; then
       ok "zram-tools 安装成功"
+      systemctl enable zramswap 2>/dev/null || true
+      systemctl start zramswap 2>/dev/null || true
       return 0
     fi
   elif cmd_exists yum; then
     if yum install -y zram-tools 2>/dev/null || yum install -y zram 2>/dev/null; then
       ok "zram 相关组件安装成功"
+      systemctl enable zramswap 2>/dev/null || true
+      systemctl start zramswap 2>/dev/null || true
       return 0
     fi
   elif cmd_exists dnf; then
     if dnf install -y zram-tools 2>/dev/null || dnf install -y zram-generator 2>/dev/null; then
       ok "zram 相关组件安装成功"
+      systemctl enable zramswap 2>/dev/null || true
+      systemctl start zramswap 2>/dev/null || true
       return 0
     fi
   fi
 
-  err "zram-tools 自动安装失败，请手动安装后重试。"
+  # 包管理器安装失败时，尝试手动创建 zram 设备作为兜底
+  info "包安装失败，尝试手动配置 zram..."
+  if modprobe zram 2>/dev/null; then
+    if cmd_exists zramctl; then
+      local total_mem_kb
+      total_mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+      local zram_size_mb=$(( total_mem_kb * 75 / 100 / 1024 ))
+      [ "$zram_size_mb" -lt 64 ] && zram_size_mb=64
+      if zramctl /dev/zram0 --algorithm lz4 --size "${zram_size_mb}M" 2>/dev/null || \
+         zramctl /dev/zram0 --algorithm zstd --size "${zram_size_mb}M" 2>/dev/null; then
+        mkswap /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 2>/dev/null
+        ok "zram 已手动创建：${zram_size_mb}MB"
+        return 0
+      fi
+    fi
+  fi
+
+  err "zram 自动安装/配置失败，请手动安装 zram-tools 后重试。"
   return 1
 }
 
@@ -859,6 +887,108 @@ precheck(){
   fi
   echo
 
+  # ===== 内核版本检测（BBR 需要 4.9+）=====
+  echo -e "${BOLD}=== 内核版本兼容性 ===${NC}"
+  local kern_major kern_minor
+  kern_major="$(uname -r | cut -d. -f1)"
+  kern_minor="$(uname -r | cut -d. -f2)"
+  if (( kern_major > 4 || (kern_major == 4 && kern_minor >= 9) )); then
+    ok "内核 $(uname -r) 满足 BBR 最低要求（4.9+）"
+  else
+    warn "内核 $(uname -r) 低于 4.9，BBR 不可用，部分方案效果受限"
+  fi
+  # 5.8+ 支持 BBRv2/fq_codel 深度优化
+  if (( kern_major > 5 || (kern_major == 5 && kern_minor >= 8) )); then
+    ok "内核 ≥5.8，支持高级队列调度与 MPTCP"
+  fi
+  echo
+
+  # ===== 文件描述符限制检测 =====
+  echo -e "${BOLD}=== 文件描述符限制 (ulimit) ===${NC}"
+  local cur_nofile max_nofile
+  cur_nofile="$(ulimit -Sn 2>/dev/null || echo unknown)"
+  max_nofile="$(ulimit -Hn 2>/dev/null || echo unknown)"
+  echo "  软限制 (soft): $cur_nofile"
+  echo "  硬限制 (hard): $max_nofile"
+  if [[ "$cur_nofile" =~ ^[0-9]+$ ]] && (( cur_nofile < 65536 )); then
+    warn "文件描述符软限制仅 $cur_nofile，代理高并发场景建议 ≥524288"
+    info "可通过「系统级深度优化」菜单中的文件描述符优化自动修复"
+  elif [[ "$cur_nofile" =~ ^[0-9]+$ ]] && (( cur_nofile >= 524288 )); then
+    ok "文件描述符限制充足（$cur_nofile）"
+  fi
+  echo
+
+  # ===== sysctl 可写性检测（容器/OpenVZ 关键检查） =====
+  echo -e "${BOLD}=== sysctl 写入权限测试 ===${NC}"
+  local sysctl_writable=1
+  # 测试一个无害参数的写入能力
+  local _orig_val
+  _orig_val="$(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null || echo "")"
+  if [[ -n "$_orig_val" ]]; then
+    if sysctl -w net.ipv4.tcp_slow_start_after_idle="$_orig_val" >/dev/null 2>&1; then
+      ok "sysctl 参数可写"
+    else
+      err "sysctl 无法写入（OpenVZ/容器 可能共享宿主内核，优化受限）"
+      sysctl_writable=0
+    fi
+  fi
+  echo
+
+  # ===== 磁盘空间检测（快照目录所在分区） =====
+  echo -e "${BOLD}=== 磁盘空间 ===${NC}"
+  local avail_mb
+  avail_mb="$(df -m /root 2>/dev/null | awk 'NR==2{print $4}')"
+  if [[ -n "$avail_mb" ]] && (( avail_mb > 0 )); then
+    if (( avail_mb < 100 )); then
+      warn "磁盘剩余空间仅 ${avail_mb}MB（快照备份需要空间，建议清理或执行「清理旧快照」）"
+    elif (( avail_mb < 500 )); then
+      info "磁盘剩余：${avail_mb}MB（尚可）"
+    else
+      ok "磁盘剩余：${avail_mb}MB"
+    fi
+  fi
+  echo
+
+  # ===== 时间同步状态 =====
+  echo -e "${BOLD}=== 时间同步状态 ===${NC}"
+  if cmd_exists timedatectl; then
+    local ntp_status
+    ntp_status="$(timedatectl 2>/dev/null | grep -iE 'NTP|synchronized|System clock' || true)"
+    if echo "$ntp_status" | grep -qi "yes"; then
+      ok "系统时钟已同步"
+    else
+      warn "系统时钟可能未同步（TLS 证书验证/HY2 握手可能异常）"
+      info "建议执行：timedatectl set-ntp true"
+    fi
+  elif cmd_exists ntpstat; then
+    if ntpstat >/dev/null 2>&1; then
+      ok "NTP 已同步"
+    else
+      warn "NTP 未同步"
+    fi
+  else
+    info "未检测到 timedatectl/ntpstat，无法验证时间同步"
+  fi
+  echo
+
+  # ===== 当前已应用方案回显 =====
+  echo -e "${BOLD}=== 当前优化方案状态 ===${NC}"
+  if [[ -f "$PROFILE_STATE_FILE" ]]; then
+    local cur_p
+    cur_p="$(cat "$PROFILE_STATE_FILE" 2>/dev/null | tr -d ' \n\r')"
+    if [[ -n "$cur_p" ]]; then
+      info "当前已应用方案：$(get_profile_name "$cur_p")"
+    fi
+  else
+    info "尚未应用任何优化方案"
+  fi
+  if [[ -f "$ACTIVE_FILE" ]]; then
+    local key_count
+    key_count="$(grep -c '=' "$ACTIVE_FILE" 2>/dev/null || echo 0)"
+    info "托管配置文件：$ACTIVE_FILE（${key_count} 条规则）"
+  fi
+  echo
+
   echo -e "${BOLD}=== 适合代理建议 ===${NC}"
   echo -e "  ${GREEN}推荐配置: BBR + fq + txqueuelen>=8192 + netdev_max_backlog>=16384${NC}"
   echo "  查看上面各项是否满足判断即可"
@@ -1108,9 +1238,12 @@ IOSchedulingPriority=0
 LimitNOFILE=524288
 LimitNPROC=65536
 EOF
-      systemctl daemon-reload
-      systemctl restart s-ui.service
-      ok "s-ui.service 已优化：Nice=-10 + 文件描述符 524288"
+      systemctl daemon-reload 2>/dev/null || true
+      if systemctl restart s-ui.service 2>/dev/null; then
+          ok "s-ui.service 已优化：Nice=-10 + 文件描述符 524288"
+      else
+          warn "s-ui.service 优化配置已写入，但重启失败，请手动检查：systemctl status s-ui.service"
+      fi
   elif [[ "$p" == "udp_quic" ]]; then
       warn "未检测到 s-ui.service，请手动确认服务状态"
   fi
@@ -1484,20 +1617,22 @@ apply_system_optimizations(){
   else
       echo "DefaultLimitNPROC=65536" >> /etc/systemd/system.conf
   fi
-  systemctl daemon-reload
+  systemctl daemon-reload 2>/dev/null || warn "systemd daemon-reload 失败"
   ok "已更新 systemd 全局 DefaultLimitNOFILE=1048576"
   
   # security limits
   if [[ -f /etc/security/limits.conf ]]; then
-    # clean old
-    sed -i '/^\*.*nofile/d' /etc/security/limits.conf
-    sed -i '/^root.*nofile/d' /etc/security/limits.conf
-    # insert new
+    # clean old (only lines managed by this script, identified by trailing comment)
+    sed -i '/# net-tune-pro$/d' /etc/security/limits.conf
+    # also clean legacy lines without comment (from older script versions)
+    sed -i '/^\*.*nofile.*1048576$/d' /etc/security/limits.conf
+    sed -i '/^root.*nofile.*1048576$/d' /etc/security/limits.conf
+    # insert new (with marker comment for safe repeated cleanup)
     cat >> /etc/security/limits.conf <<EOF
-* soft nofile 1048576
-* hard nofile 1048576
-root soft nofile 1048576
-root hard nofile 1048576
+* soft nofile 1048576 # net-tune-pro
+* hard nofile 1048576 # net-tune-pro
+root soft nofile 1048576 # net-tune-pro
+root hard nofile 1048576 # net-tune-pro
 EOF
     ok "已更新 /etc/security/limits.conf 全局限制规则"
   fi
@@ -1871,11 +2006,12 @@ optimize_swap(){
 
     # 设置 swappiness 为 0
     sysctl -w vm.swappiness=0 >/dev/null 2>&1
-    # 永久写入
+    # 永久写入（sed 替换更稳健，避免删除+追加被中断时丢失条目）
     if grep -q '^vm.swappiness' /etc/sysctl.conf 2>/dev/null; then
-      sed -i '/^vm.swappiness/d' /etc/sysctl.conf
+      sed -i 's/^vm.swappiness=.*/vm.swappiness=0/' /etc/sysctl.conf
+    else
+      echo "vm.swappiness=0" >> /etc/sysctl.conf
     fi
-    echo "vm.swappiness=0" >> /etc/sysctl.conf
 
     ok "swappiness 已设为 0（已永久保存）"
 
@@ -1888,14 +2024,15 @@ optimize_swap(){
     sysctl -w vm.swappiness=10 >/dev/null 2>&1
     sysctl -w vm.vfs_cache_pressure=50 >/dev/null 2>&1
 
-    # 永久写入
+    # 永久写入（sed 替换更稳健，避免删除+追加被中断时丢失条目）
     local param
     for param in "vm.swappiness=10" "vm.vfs_cache_pressure=50"; do
       local key="${param%%=*}"
       if grep -q "^${key}" /etc/sysctl.conf 2>/dev/null; then
-        sed -i "/^${key}/d" /etc/sysctl.conf
+        sed -i "s/^${key}=.*/${param}/" /etc/sysctl.conf
+      else
+        echo "$param" >> /etc/sysctl.conf
       fi
-      echo "$param" >> /etc/sysctl.conf
     done
 
     line
@@ -1923,8 +2060,8 @@ LimitNOFILE=524288
 EOF
 
   info "正在重载 systemd 守护进程并重启 s-ui 服务..."
-  systemctl daemon-reload
-  systemctl restart s-ui.service
+  systemctl daemon-reload 2>/dev/null || warn "systemd daemon-reload 失败"
+  systemctl restart s-ui.service 2>/dev/null || true
 
   if systemctl is-active --quiet s-ui.service; then
     ok "s-ui 服务优先级及文件描述符上限设置成功，并已重启生效！"
@@ -1938,39 +2075,67 @@ daily_restart_optimization(){
   echo -e "${BOLD}【zram + swappiness + s-ui 每日重启优化】${NC}"
   line
 
-  # 0. 确保 zram 已安装
+  # 0. 确保 zram 已安装（自动安装 + 手动兜底）
   ensure_zram || return 1
 
   local CONFIG="/etc/default/zramswap"
 
-  # 1. 配置 zram
-  if [ -f "$CONFIG" ]; then
-      cp "$CONFIG" "${CONFIG}.bak.$(date +%F)" 2>/dev/null || true
-      sed -i 's/^#\?PERCENT=.*/PERCENT=75/' "$CONFIG" 2>/dev/null || true
-      grep -q "^PERCENT=" "$CONFIG" || echo "PERCENT=75" >> "$CONFIG"
-  else
-      echo "PERCENT=75" > "$CONFIG"
-  fi
+  # 1. 配置 zram（仅当 zramswap 服务存在时写入配置文件）
+  if systemctl list-unit-files zramswap.service 2>/dev/null | grep -q 'zramswap\.service'; then
+      if [ -f "$CONFIG" ]; then
+          # 备份带秒级时间戳，避免同日重复运行覆盖原始备份
+          cp "$CONFIG" "${CONFIG}.bak.$(date +%F_%H%M%S)" 2>/dev/null || true
+          sed -i 's/^#\?PERCENT=.*/PERCENT=75/' "$CONFIG" 2>/dev/null || true
+          grep -q "^PERCENT=" "$CONFIG" || echo "PERCENT=75" >> "$CONFIG"
+      else
+          echo "PERCENT=75" > "$CONFIG"
+      fi
 
-  # 2. 重启 zram
-  systemctl restart zramswap 2>/dev/null || warn "zramswap 服务重启失败（可能未安装 zram-tools？）"
+      # 2. 重启 zramswap 服务（已在运行时跳过，避免不必要的 swap 中断）
+      if systemctl is-active --quiet zramswap 2>/dev/null; then
+          ok "zramswap 服务已在运行，跳过重启"
+      elif ! systemctl restart zramswap 2>/dev/null; then
+          warn "zramswap 服务重启失败，尝试 enable + start..."
+          systemctl enable zramswap 2>/dev/null || true
+          systemctl start zramswap 2>/dev/null || warn "zramswap 启动仍然失败"
+      fi
+  else
+      # 手动模式兜底（ensure_zram 通过 modprobe+zramctl 创建的情况）
+      if [ -b /dev/zram0 ]; then
+          ok "zram 已通过手动模式运行（/dev/zram0）"
+      else
+          warn "zramswap 服务不存在且手动模式未生效，zram 跳过"
+      fi
+  fi
 
   # 3. swappiness
   sysctl -w vm.swappiness=10 >/dev/null 2>&1 || true
   local SYSCTL="/etc/sysctl.conf"
-  cp "$SYSCTL" "${SYSCTL}.bak.$(date +%F)" 2>/dev/null || true
-  grep -q "^vm.swappiness" "$SYSCTL" 2>/dev/null || echo "vm.swappiness=10" >> "$SYSCTL"
-
-  # 4. cron
-  if [ -x /usr/bin/s-ui ]; then
-      (crontab -l 2>/dev/null | grep -v "/usr/bin/s-ui restart"; echo "0 4 * * * /usr/bin/s-ui restart") | crontab -
+  # 备份带秒级时间戳，避免同日重复运行覆盖原始备份
+  cp "$SYSCTL" "${SYSCTL}.bak.$(date +%F_%H%M%S)" 2>/dev/null || true
+  if grep -q "^vm.swappiness" "$SYSCTL" 2>/dev/null; then
+      sed -i 's/^vm.swappiness=.*/vm.swappiness=10/' "$SYSCTL"
   else
-      warn "未找到 /usr/bin/s-ui"
+      echo "vm.swappiness=10" >> "$SYSCTL"
   fi
 
+  # 4. cron：s-ui 每日重启
+  if [ -x /usr/bin/s-ui ]; then
+      (crontab -l 2>/dev/null | grep -v "/usr/bin/s-ui restart"; echo "0 4 * * * /usr/bin/s-ui restart") | crontab -
+      ok "已添加 s-ui 每日 04:00 自动重启 cron 任务"
+  else
+      warn "未找到 /usr/bin/s-ui，跳过每日重启设置"
+  fi
+
+  line
   ok "完成：zram=75%、swappiness=10、s-ui 每日4点重启"
   info "当前 swappiness: $(sysctl -n vm.swappiness 2>/dev/null || echo '未知')"
-  info "zram 配置: $(grep PERCENT "$CONFIG" 2>/dev/null || echo '未找到')"
+  # 显示 zram 实际状态
+  if [ -b /dev/zram0 ]; then
+      info "zram 状态: $(zramctl 2>/dev/null | head -2 || swapon --show=NAME,SIZE,USED 2>/dev/null | grep zram || echo '活跃')"
+  else
+      info "zram 配置: $(grep PERCENT "$CONFIG" 2>/dev/null || echo '未找到')"
+  fi
 }
 
 system_optimize_menu(){
@@ -2256,6 +2421,8 @@ enable_bbr_fq(){
     info "已清除托管文件 $ACTIVE_FILE 中的重复 qdisc/cc 配置"
   fi
 
+  # 确保文件末尾有换行符，防止新行拼接到最后一行
+  [[ -s "$bbr_conf" ]] && [[ "$(tail -c 1 "$bbr_conf" 2>/dev/null | wc -l)" -eq 0 ]] && echo >> "$bbr_conf"
   echo "net.core.default_qdisc = fq" >> "$bbr_conf"
   echo "net.ipv4.tcp_congestion_control = bbr" >> "$bbr_conf"
 
@@ -2333,5 +2500,5 @@ main_menu(){
 }
 
 need_root
-check_base_deps
+check_base_deps || { err "基础依赖检查未通过，无法启动。"; exit 1; }
 main_menu
