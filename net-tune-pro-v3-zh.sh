@@ -1579,6 +1579,12 @@ EOF
     info "未安装 iptables，跳过 NOTRACK"
   fi
 
+  # ===== 11. 缓冲区与发送重排深度优化 =====
+  echo -e "${BOLD}[11/11] 缓冲区与发送重排深度优化 (udp_mem, tcp_notsent_lowat)${NC}"
+  sysctl -w net.ipv4.udp_mem="65536 131072 262144" >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1 || true
+  ok "已应用"
+
   line
   ok "系统级深度优化完成"
 
@@ -1684,6 +1690,9 @@ sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=7200 2>/dev/null ||
 sysctl -w net.netfilter.nf_conntrack_tcp_timeout_time_wait=30 2>/dev/null || true
 sysctl -w net.netfilter.nf_conntrack_udp_timeout=30 2>/dev/null || true
 sysctl -w net.netfilter.nf_conntrack_udp_timeout_stream=60 2>/dev/null || true
+# Buffer size and Send queue
+sysctl -w net.ipv4.udp_mem="65536 131072 262144" 2>/dev/null || true
+sysctl -w net.ipv4.tcp_notsent_lowat=16384 2>/dev/null || true
 # CPU performance
 for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
   echo performance > \$g 2>/dev/null || true
@@ -1896,6 +1905,43 @@ EOF
   fi
 }
 
+daily_restart_optimization(){
+  echo
+  echo -e "${BOLD}【zram + swappiness + s-ui 每日重启优化】${NC}"
+  line
+
+  local CONFIG="/etc/default/zramswap"
+
+  # 1. 配置 zram
+  if [ -f "$CONFIG" ]; then
+      cp "$CONFIG" "${CONFIG}.bak.$(date +%F)" 2>/dev/null || true
+      sed -i 's/^#\?PERCENT=.*/PERCENT=75/' "$CONFIG" 2>/dev/null || true
+      grep -q "^PERCENT=" "$CONFIG" || echo "PERCENT=75" >> "$CONFIG"
+  else
+      echo "PERCENT=75" > "$CONFIG"
+  fi
+
+  # 2. 重启 zram
+  systemctl restart zramswap 2>/dev/null || warn "zramswap 服务重启失败（可能未安装 zram-tools？）"
+
+  # 3. swappiness
+  sysctl -w vm.swappiness=10 >/dev/null 2>&1 || true
+  local SYSCTL="/etc/sysctl.conf"
+  cp "$SYSCTL" "${SYSCTL}.bak.$(date +%F)" 2>/dev/null || true
+  grep -q "^vm.swappiness" "$SYSCTL" 2>/dev/null || echo "vm.swappiness=10" >> "$SYSCTL"
+
+  # 4. cron
+  if [ -x /usr/bin/s-ui ]; then
+      (crontab -l 2>/dev/null | grep -v "/usr/bin/s-ui restart"; echo "0 4 * * * /usr/bin/s-ui restart") | crontab -
+  else
+      warn "未找到 /usr/bin/s-ui"
+  fi
+
+  ok "完成：zram=75%、swappiness=10、s-ui 每日4点重启"
+  info "当前 swappiness: $(sysctl -n vm.swappiness 2>/dev/null || echo '未知')"
+  info "zram 配置: $(grep PERCENT "$CONFIG" 2>/dev/null || echo '未找到')"
+}
+
 system_optimize_menu(){
   while true; do
   clear
@@ -1906,6 +1952,7 @@ system_optimize_menu(){
   echo "4) 强制清除所有限速规则 (tc qdisc clean)"
   echo "5) 设置网卡发送队列长度 (txqueuelen)"
   echo "6) 设置 s-ui 服务最高优先级 (Nice=-10)"
+  echo "7) 运行 zram + swappiness + s-ui 每日重启优化"
   echo "0) 返回主菜单"
   line
   read -rp "请输入选项: " choice
@@ -1916,6 +1963,7 @@ system_optimize_menu(){
     4) clear_tc_rules; pause ;;
     5) set_txqueuelen; pause ;;
     6) set_sui_priority; pause ;;
+    7) daily_restart_optimization; pause ;;
     0) return ;;
     *) warn "无效选择" ;;
   esac
