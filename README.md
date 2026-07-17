@@ -32,6 +32,12 @@
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/net-tune-pro-v3-zh.sh)
 ```
 
+**HY2 (全能优化 - 强烈推荐)**
+*整合优化方案*
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/hy2-net-auto-tune.sh)
+```
+
 ### 🛠️ 专项管理工具
 
 **1. 端口限速工具 (`tc` + `iptables` 精准流控)**
