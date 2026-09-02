@@ -39,7 +39,6 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/ma
 ```
 
 **vps 端口修改**
-*vpsssh*
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/ssh-port.sh)
 ```
