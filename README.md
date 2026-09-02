@@ -38,6 +38,12 @@ bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/master/net-tu
 bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/hy2-net-auto-tune.sh)
 ```
 
+**vps 端口修改**
+*vpsssh*
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/suxayii/Throttle/refs/heads/master/ssh-port.sh)
+```
+
 ### 🛠️ 专项管理工具
 
 **1. 端口限速工具 (`tc` + `iptables` 精准流控)**
