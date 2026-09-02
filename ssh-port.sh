@@ -421,6 +421,18 @@ fi
 # ------------------------------------------
 # 重启 / 重载
 # ------------------------------------------
+apply_ssh_service() {
+    if [ -z "$SSH_SERVICE" ]; then
+        return 1
+    fi
+    if [ "$SOCKET_ACTIVE" -eq 1 ]; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl restart "$SSH_SOCKET" && systemctl restart "$SSH_SERVICE"
+        return
+    fi
+    systemctl reload "$SSH_SERVICE" 2>/dev/null || systemctl restart "$SSH_SERVICE"
+}
+
 rollback() {
     err "正在恢复备份配置..."
     cp -a "$BACKUP_DIR/sshd_config" "$SSHD_CONFIG"
@@ -447,21 +459,10 @@ if [ -z "$SSH_SERVICE" ]; then
     exit 1
 fi
 
-if [ "$SOCKET_ACTIVE" -eq 1 ]; then
-    if ! systemctl restart "$SSH_SOCKET" || ! systemctl restart "$SSH_SERVICE"; then
-        err "SSH socket/服务重启失败"
-        rollback
-        exit 1
-    fi
-else
-    # reload 保留当前会话；端口变更必须重新绑定，reload 通常足够
-    if ! systemctl reload "$SSH_SERVICE" 2>/dev/null; then
-        if ! systemctl restart "$SSH_SERVICE"; then
-            err "SSH 重启失败"
-            rollback
-            exit 1
-        fi
-    fi
+if ! apply_ssh_service; then
+    err "SSH 重启失败"
+    rollback
+    exit 1
 fi
 
 sleep 2
@@ -469,6 +470,83 @@ sleep 2
 listening_on() {
     local p="$1"
     ss -lntH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
+}
+
+close_firewall_22() {
+    local changed=0
+
+    if command -v ufw >/dev/null 2>&1; then
+        local st
+        st="$(ufw status 2>/dev/null | head -1 || true)"
+        if echo "$st" | grep -qi "active"; then
+            info "从 UFW 移除 22/tcp"
+            # 可能同时存在 22/tcp 与 OpenSSH 应用规则
+            ufw delete allow 22/tcp >/dev/null 2>&1 && changed=1 || true
+            ufw delete allow OpenSSH >/dev/null 2>&1 && changed=1 || true
+            ufw --force delete allow 22 >/dev/null 2>&1 && changed=1 || true
+            ok "UFW 已尝试关闭 22"
+        fi
+    fi
+
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        info "从 firewalld 移除 22/tcp 与 ssh 服务"
+        firewall-cmd --permanent --remove-port=22/tcp >/dev/null 2>&1 && changed=1 || true
+        firewall-cmd --permanent --remove-service=ssh >/dev/null 2>&1 && changed=1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+        ok "firewalld 已尝试关闭 22"
+    fi
+
+    if command -v ufw >/dev/null 2>&1; then
+        ufw status 2>/dev/null | grep -qi "active" && return 0
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --state >/dev/null 2>&1 && return 0
+    fi
+
+    if command -v iptables >/dev/null 2>&1; then
+        while iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null; do
+            iptables -D INPUT -p tcp --dport 22 -j ACCEPT
+            changed=1
+        done
+        if [ "$changed" -eq 1 ]; then
+            warn "已删除 iptables 中 22/tcp ACCEPT（若规则带网卡/源地址限制，请手动核对）"
+            if command -v netfilter-persistent >/dev/null 2>&1; then
+                netfilter-persistent save >/dev/null 2>&1 || true
+            elif command -v service >/dev/null 2>&1 && [ -x /etc/init.d/iptables ]; then
+                service iptables save >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+}
+
+close_listen_22() {
+    info "将 SSH 监听收敛为仅 ${NEW_PORT}"
+    DESIRED_PORTS=("$NEW_PORT")
+    write_port_config "${DESIRED_PORTS[@]}"
+    configure_socket
+
+    if ! sshd -t; then
+        err "去掉 22 后配置检查失败，已中止（未重启服务）"
+        return 1
+    fi
+    if ! apply_ssh_service; then
+        err "去掉 22 后 SSH 重启失败"
+        rollback
+        return 1
+    fi
+    sleep 2
+    if ! listening_on "$NEW_PORT"; then
+        err "新端口 ${NEW_PORT} 未在监听，正在回滚"
+        rollback
+        return 1
+    fi
+    if listening_on 22; then
+        warn "本机仍有进程监听 22，请手动检查：ss -lntp | grep ':22'"
+        ss -lntpH 2>/dev/null | grep -E '[:.]22([[:space:]]|$)' || true
+    else
+        ok "SSH 已不再监听 22"
+    fi
+    return 0
 }
 
 if listening_on "$NEW_PORT"; then
@@ -490,14 +568,46 @@ if listening_on "$NEW_PORT"; then
     echo
     echo "    ssh -p ${NEW_PORT} root@你的服务器IP"
     echo
-    if [[ "$DUAL" =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}确认新端口可登录后，再运行一次本脚本并选择不再双端口，或手动删除旧 Port。${NC}"
-        echo -e "${YELLOW}不要在未验证前关闭当前会话，也不要立刻在安全组里删 22。${NC}"
-    else
-        echo -e "${YELLOW}请先用新端口登录成功，再关闭当前会话。${NC}"
-        echo -e "${YELLOW}云安全组若仍只放行 22，外网会连不上新端口。${NC}"
-    fi
+    echo -e "${YELLOW}不要在未验证前关闭当前会话。云安全组请自行放行 ${NEW_PORT}/tcp。${NC}"
     echo
+
+    if [ "$NEW_PORT" != "22" ]; then
+        echo -e "${BLUE}------------------------------------------${NC}"
+        echo -e "${BLUE}关闭 22 端口（可选）${NC}"
+        echo -e "${BLUE}------------------------------------------${NC}"
+        echo
+        warn "只有在新窗口已经用 ${NEW_PORT} 登录成功后再做这一步。"
+        warn "本脚本不能改云厂商安全组；安全组里的 22 需要你自己删。"
+        echo
+        read -rp "是否已用新端口从另一个窗口成功登录？[y/N]：" TESTED_OK
+        if [[ "$TESTED_OK" =~ ^[Yy]$ ]]; then
+            read -rp "停止 SSH 监听 22 端口？[y/N]：" CLOSE_LISTEN
+            if [[ "$CLOSE_LISTEN" =~ ^[Yy]$ ]]; then
+                if close_listen_22; then
+                    ok "SSH 配置已去掉 22"
+                else
+                    err "关闭 SSH 的 22 监听失败，请检查备份：$BACKUP_DIR"
+                fi
+            else
+                info "保留 SSH 监听 22"
+            fi
+
+            read -rp "同时关闭本机防火墙中的 22/tcp？[y/N]：" CLOSE_FW
+            if [[ "$CLOSE_FW" =~ ^[Yy]$ ]]; then
+                if ! listening_on "$NEW_PORT"; then
+                    err "新端口未监听，拒绝关闭防火墙 22"
+                else
+                    close_firewall_22
+                    ok "本机防火墙 22 处理完毕"
+                fi
+            else
+                info "本机防火墙 22 保持不变"
+            fi
+        else
+            info "跳过关闭 22。验证新端口后可重新运行脚本再关。"
+        fi
+        echo
+    fi
 else
     err "未检测到 SSH 监听 ${NEW_PORT}"
     ss -lntpH 2>/dev/null | grep -E 'sshd|ssh' || true
